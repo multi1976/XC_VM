@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS `source_health_profiles` (
+  `stream_id` int(11) NOT NULL,
+  `source_hash` char(32) NOT NULL,
+  `server_id` int(11) NOT NULL,
+  `fingerprint` varchar(190) NOT NULL DEFAULT '',
+  `label` varchar(190) NOT NULL DEFAULT '',
+  `video_codec` varchar(32) NOT NULL DEFAULT '',
+  `video_profile` varchar(64) NOT NULL DEFAULT '',
+  `width` int(11) NOT NULL DEFAULT 0,
+  `height` int(11) NOT NULL DEFAULT 0,
+  `fps` decimal(7,3) NOT NULL DEFAULT 0.000,
+  `scan` char(1) NOT NULL DEFAULT '?',
+  `audio_codec` varchar(32) NOT NULL DEFAULT '',
+  `audio_rate` int(11) NOT NULL DEFAULT 0,
+  `audio_channels` tinyint(4) NOT NULL DEFAULT 0,
+  `bitrate` int(11) DEFAULT NULL,
+  `first_seen` int(11) NOT NULL,
+  `last_seen` int(11) NOT NULL,
+  PRIMARY KEY (`stream_id`, `source_hash`, `server_id`),
+  KEY `last_seen` (`last_seen`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

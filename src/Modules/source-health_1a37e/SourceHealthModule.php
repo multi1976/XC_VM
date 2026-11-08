@@ -1,0 +1,48 @@
+<?php
+
+namespace XcVm\Module\SourceHealth;
+
+use XcVm\Cli\CommandRegistry;
+use XcVm\Core\Container\ServiceContainer;
+use XcVm\Core\Events\ListensTo;
+use XcVm\Core\Events\Stream\StreamsDeletedEvent;
+use XcVm\Core\Module\BaseModule;
+use XcVm\Core\Module\StreamFormRegistry;
+
+/**
+ * Source Health — phase 1 of smarter source selection: measure first.
+ *
+ * Adds a read-only "Source Health" tab to the Edit Stream page and a cron that
+ * records the output profile of every source while it is on air. It reads core
+ * tables and changes nothing about how streams run.
+ */
+class SourceHealthModule extends BaseModule {
+	public function getName(): string {
+		return 'source-health';
+	}
+
+	public function getVersion(): string {
+		return '0.1.0';
+	}
+
+	public function boot(ServiceContainer $container): void {
+		StreamFormRegistry::add(
+			'source-health',
+			'Source Health',
+			static fn (?array $rStream, string $rMode): string => SourceHealthTab::render($rStream, $rMode)
+		);
+	}
+
+	public function registerCommands(CommandRegistry $registry): void {
+		$registry->register(new SourceHealthCronJob());
+	}
+
+	public function getCronEntries(): array {
+		return ['*/5 * * * *' => 'cron:source_health'];
+	}
+
+	#[ListensTo(StreamsDeletedEvent::class)]
+	public function onStreamsDeleted(StreamsDeletedEvent $rEvent): void {
+		SourceHealthRepository::deleteForStreams($rEvent->streamIds);
+	}
+}
