@@ -21,6 +21,8 @@ src/tmp/**
 # Modules are installed per panel and ship from their own repositories; keep
 # only the directory placeholder so a locally installed module never gets committed.
 src/Modules/*
+# Fork: the Channel Audit module lives in this tree (multi1976/XC_VM)
+!src/Modules/channel-audit_4eeff/
 !src/Modules/.gitkeep
 src/bin/xc_fanout/disabled
 
