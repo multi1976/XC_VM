@@ -151,6 +151,25 @@ final class SourceHealthCalculatorTest extends TestCase {
 		$this->assertGreaterThan(75, $rRows[0]['score']);
 	}
 
+	public function testIncidentTimesAndALastDayWindowFromTheSameLog(): void {
+		$rDay = 86400;
+		$rEvents = [
+			self::ev(1, 'STREAM_START', self::A, 1000),
+			self::ev(1, 'STREAM_FAILED', self::A, 2000),
+			self::ev(1, 'STREAM_RESTART', self::A, 2010),
+			self::ev(1, 'STREAM_FAILED', self::A, 2500),          // same outage
+			self::ev(1, 'STREAM_RESTART', self::A, 2510),          // then clean for days
+		];
+		$rNow = 1000 + 3 * $rDay;
+		$rWeek = self::rows($rEvents, 1000, $rNow, [1 => self::A]);
+		$rLastDay = self::rows($rEvents, $rNow - $rDay, $rNow, [1 => self::A]);
+
+		$this->assertSame([2000], $rWeek[0]['incident_times']);
+		$this->assertSame(0, $rLastDay[0]['incidents']);
+		$this->assertSame($rDay, $rLastDay[0]['uptime_sec']);       // the run open since 2510 seeds the day
+		$this->assertGreaterThanOrEqual(95, $rLastDay[0]['score']);
+	}
+
 	public function testAFailedStartDoesNotHideTheNextDrop(): void {
 		$rRows = self::rows([
 			self::ev(1, 'STREAM_START_FAIL', self::A, 1000),

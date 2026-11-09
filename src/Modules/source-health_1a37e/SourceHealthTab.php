@@ -28,14 +28,63 @@ final class SourceHealthTab {
 			$rNow = time();
 			$rFrom = $rNow - self::window();
 			$rStreamID = (int) $rStream['id'];
-			$rRows = SourceHealthCalculator::compute($rSources, SourceHealthRepository::events($rStreamID, $rFrom), $rFrom, $rNow, SourceHealthRepository::running($rStreamID));
+			$rEvents = SourceHealthRepository::events($rStreamID, $rFrom);
+			$rRunning = SourceHealthRepository::running($rStreamID);
+			$rRows = SourceHealthCalculator::compute($rSources, $rEvents, $rFrom, $rNow, $rRunning);
+			// The same log read over the last day only: what the source is like now.
+			$rRecent = array_column(SourceHealthCalculator::compute($rSources, $rEvents, max($rFrom, $rNow - 86400), $rNow, $rRunning), null, 'index');
 			$rProfiles = SourceHealthRepository::profiles($rStreamID);
 		} catch (\Throwable $e) {
 			error_log('source-health: ' . $e->getMessage());
 			return self::note('The report could not be built: ' . $e->getMessage());
 		}
 
-		return self::table($rRows, $rProfiles, $rFrom, $rNow);
+		return self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow) . self::timeline($rRows, $rFrom, $rNow);
+	}
+
+	/**
+	 * Incidents per day and hour, one row per source: shows whether a source
+	 * fails all the time or in bad spells (an evening, one day of trouble).
+	 *
+	 * @param list<array<string, mixed>> $rRows
+	 */
+	private static function timeline(array $rRows, int $rFrom, int $rNow): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rDays = [];
+		for ($t = strtotime(date('Y-m-d', $rFrom)); $t <= $rNow; $t = strtotime('+1 day', $t)) {
+			$rDays[date('Y-m-d', $t)] = $t;
+		}
+		$rHtml = '<h6 class="mt-4 mb-1">Incident timeline</h6>'
+			. '<p class="text-muted small mb-2">Incidents per day; the hours they started in underneath, the exact times on hover, and the attempts that did not start at all. A source that fails in spells looks very different from one that fails all the time.</p>'
+			. '<div class="table-responsive"><table class="table table-sm table-bordered text-center mb-2"><thead><tr><th class="text-start">#</th>';
+		foreach ($rDays as $rDay => $t) {
+			$rHtml .= '<th>' . $h(date('D d.m', $t)) . '</th>';
+		}
+		$rHtml .= '</tr></thead><tbody>';
+		foreach ($rRows as $rRow) {
+			$rByDay = $rFailedStarts = [];
+			foreach ($rRow['incident_times'] as $rTime) {
+				$rByDay[date('Y-m-d', $rTime)][] = $rTime;
+			}
+			foreach ($rRow['start_fail_times'] as $rTime) {
+				$rFailedStarts[date('Y-m-d', $rTime)] = ($rFailedStarts[date('Y-m-d', $rTime)] ?? 0) + 1;
+			}
+			$rHtml .= '<tr><td class="text-start">' . ((int) $rRow['index'] + 1) . ' <small class="text-muted">' . $h(self::mask($rRow['source'])) . '</small></td>';
+			foreach (array_keys($rDays) as $rDay) {
+				$rTimes = $rByDay[$rDay] ?? [];
+				$rMissed = isset($rFailedStarts[$rDay]) ? '<br><small class="text-danger">' . $rFailedStarts[$rDay] . '× did not start</small>' : '';
+				if ($rTimes === []) {
+					$rHtml .= '<td class="text-muted">' . ($rMissed !== '' ? '–' . $rMissed : '·') . '</td>';
+					continue;
+				}
+				$rHours = array_values(array_unique(array_map(static fn (int $t): string => date('H', $t), $rTimes)));
+				$rClass = count($rTimes) >= 3 ? 'bg-label-danger' : 'bg-label-warning';
+				$rHtml .= '<td class="' . $rClass . '" title="' . $h(implode(', ', array_map(static fn (int $t): string => date('H:i', $t), $rTimes))) . '">'
+					. '<strong>' . count($rTimes) . '</strong><br><small>' . $h(implode(' ', array_map(static fn (string $x): string => $x . 'h', $rHours))) . '</small>' . $rMissed . '</td>';
+			}
+			$rHtml .= '</tr>';
+		}
+		return $rHtml . '</tbody></table></div>';
 	}
 
 	/** Seven days, or less when the panel keeps stream logs for less. */
@@ -48,7 +97,8 @@ final class SourceHealthTab {
 	 * @param list<array<string, mixed>> $rRows
 	 * @param array<string, array<string, mixed>> $rProfiles
 	 */
-	private static function table(array $rRows, array $rProfiles, int $rFrom, int $rNow): string {
+	/** @param array<int, array<string, mixed>> $rRecent compute() over the last 24 h, keyed by source index */
+	private static function table(array $rRows, array $rRecent, array $rProfiles, int $rFrom, int $rNow): string {
 		$rOrder = SourceHealthCalculator::suggestedOrder($rRows);
 		$rByIndex = array_column($rRows, null, 'index');
 
@@ -68,7 +118,7 @@ final class SourceHealthTab {
 		}
 		$rHtml .= '<p class="text-muted mb-2">From ' . $h(date('Y-m-d H:i', $rFrom)) . ' to now, all servers. Read-only: nothing here changes how the stream runs.</p>';
 		$rHtml .= '<div class="table-responsive"><table class="table table-sm table-hover mb-2"><thead><tr>'
-			. '<th>#</th><th>Source</th><th class="text-center">Score</th><th class="text-center">Starts / failed</th>'
+			. '<th>#</th><th>Source</th><th class="text-center">Score</th><th class="text-center" title="The same figures over the last 24 hours only">Last 24h</th><th class="text-center">Starts / failed</th>'
 			. '<th class="text-center">Failures</th><th class="text-center" title="Failures less than ' . intdiv(SourceHealthCalculator::INCIDENT_GAP_SEC, 60) . ' minutes apart count as one incident (one outage)">Incidents</th>'
 			. '<th class="text-center">Quality issues</th><th class="text-center">On air</th>'
 			. '<th class="text-center" title="Mean time on air between incidents">MTBF</th><th>Last failure</th><th>Output profile</th></tr></thead><tbody>';
@@ -81,6 +131,7 @@ final class SourceHealthTab {
 				. '<td>' . ((int) $rRow['index'] + 1) . ($rRow['running'] ? ' <span class="badge bg-label-success" title="On air now">live</span>' : '') . '</td>'
 				. '<td><code title="' . $h(self::mask($rRow['source'])) . '">' . $h(self::mask($rRow['source'])) . '</code></td>'
 				. '<td class="text-center">' . self::scoreBadge($rRow['score'], (string) $rRow['confidence']) . '</td>'
+				. '<td class="text-center">' . self::recent($rRecent[$rRow['index']] ?? null) . '</td>'
 				. '<td class="text-center">' . (int) $rRow['starts'] . ' / ' . (int) $rRow['start_fails'] . '</td>'
 				. '<td class="text-center">' . (int) $rRow['failures'] . '</td>'
 				. '<td class="text-center">' . (int) $rRow['incidents'] . '</td>'
@@ -111,6 +162,15 @@ final class SourceHealthTab {
 			. 'Failures less than ' . intdiv(SourceHealthCalculator::INCIDENT_GAP_SEC, 60) . ' minutes apart are one incident: a burst of retries during one outage counts once. '
 			. 'Low confidence means little data. Profiles are recorded every 5 minutes while a source is on air.</p>';
 		return $rHtml;
+	}
+
+	/** Last-24h cell: score and incident count, or "–" when the source was not tried. */
+	private static function recent(?array $rRow): string {
+		if ($rRow === null || $rRow['score'] === null) {
+			return '<span class="text-muted">–</span>';
+		}
+		return self::scoreBadge($rRow['score'], (string) $rRow['confidence'])
+			. '<br><small class="text-muted">' . (int) $rRow['incidents'] . ' inc.' . ($rRow['start_fails'] > 0 ? ' · ' . (int) $rRow['start_fails'] . ' failed starts' : '') . '</small>';
 	}
 
 	private static function scoreBadge(?int $rScore, string $rConfidence): string {

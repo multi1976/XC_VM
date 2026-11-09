@@ -103,6 +103,7 @@ final class SourceHealthCalculator {
 						// dropping — not a new one.
 						if ($rStats[$rFailed]['last_drop'] === 0 || $rTime - $rStats[$rFailed]['last_drop'] > self::INCIDENT_GAP_SEC) {
 							$rStats[$rFailed]['incidents']++;
+							$rStats[$rFailed]['incident_times'][] = $rTime;
 						}
 						$rStats[$rFailed]['last_drop'] = $rTime;
 						$rStats[$rFailed]['last_failure'] = max($rStats[$rFailed]['last_failure'], $rTime);
@@ -113,6 +114,7 @@ final class SourceHealthCalculator {
 				case $rAction === 'STREAM_START_FAIL':
 					if (isset($rStats[$rSrc])) {
 						$rStats[$rSrc]['start_fails']++;
+						$rStats[$rSrc]['start_fail_times'][] = $rTime;
 						$rStats[$rSrc]['last_failure'] = max($rStats[$rSrc]['last_failure'], $rTime);
 					}
 					break;
@@ -233,7 +235,7 @@ final class SourceHealthCalculator {
 	private static function blank(int $rIndex, string $rSource): array {
 		return [
 			'index' => $rIndex, 'source' => $rSource,
-			'starts' => 0, 'start_fails' => 0, 'failures' => 0, 'incidents' => 0, 'last_drop' => 0,
+			'starts' => 0, 'start_fails' => 0, 'failures' => 0, 'incidents' => 0, 'incident_times' => [], 'start_fail_times' => [], 'last_drop' => 0,
 			'quality_issues' => 0, 'switched_away' => 0,
 			'uptime_sec' => 0, 'last_active' => 0, 'last_failure' => 0,
 			'running' => false, 'score' => null, 'confidence' => 'none',
