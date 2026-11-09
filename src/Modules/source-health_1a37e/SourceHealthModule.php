@@ -5,6 +5,7 @@ namespace XcVm\Module\SourceHealth;
 use XcVm\Cli\CommandRegistry;
 use XcVm\Core\Container\ServiceContainer;
 use XcVm\Core\Events\ListensTo;
+use XcVm\Core\Http\Router;
 use XcVm\Core\Events\Stream\StreamsDeletedEvent;
 use XcVm\Core\Module\BaseModule;
 use XcVm\Core\Module\StreamFormRegistry;
@@ -22,7 +23,7 @@ class SourceHealthModule extends BaseModule {
 	}
 
 	public function getVersion(): string {
-		return '0.1.3';
+		return '0.1.4';
 	}
 
 	public function boot(ServiceContainer $container): void {
@@ -31,6 +32,10 @@ class SourceHealthModule extends BaseModule {
 			'Source Health',
 			static fn (?array $rStream, string $rMode): string => SourceHealthTab::render($rStream, $rMode)
 		);
+	}
+
+	public function registerRoutes(Router $router): void {
+		$router->api('source_health_probe', [SourceHealthController::class, 'probe']);
 	}
 
 	public function registerCommands(CommandRegistry $registry): void {

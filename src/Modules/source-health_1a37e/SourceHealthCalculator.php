@@ -45,9 +45,12 @@ final class SourceHealthCalculator {
 	 * @param int $rFrom window start (unix time).
 	 * @param int $rNow  window end (unix time).
 	 * @param array<int, string> $rRunning server id => source its encoder runs right now.
+	 * @param array<string, array<string, mixed>> $rProbes md5(source) => probe results in the
+	 *        window (ok, total, open_ms, last_at, last_ok, last_error): an independent test of
+	 *        every source, on air or not, so backups the stream rarely uses are measured too.
 	 * @return list<array<string, mixed>> one row per source, in the operator's order.
 	 */
-	public static function compute(array $rSources, array $rEvents, int $rFrom, int $rNow, array $rRunning = []): array {
+	public static function compute(array $rSources, array $rEvents, int $rFrom, int $rNow, array $rRunning = [], array $rProbes = []): array {
 		$rStats = [];
 		foreach (array_values($rSources) as $i => $rSource) {
 			$rKey = trim((string) $rSource);
@@ -157,8 +160,12 @@ final class SourceHealthCalculator {
 		}
 
 		$rWindow = max(1, $rNow - $rFrom);
-		foreach ($rStats as &$rRow) {
+		foreach ($rStats as $rKey => &$rRow) {
 			$rRow['uptime_sec'] = min($rRow['uptime_sec'], $rWindow * max(1, count($rLast)));
+			$rProbe = $rProbes[md5((string) $rKey)] ?? null;
+			$rRow['probe_ok'] = (int) ($rProbe['ok'] ?? 0);
+			$rRow['probe_total'] = (int) ($rProbe['total'] ?? 0);
+			$rRow['probe'] = $rProbe;
 			[$rRow['score'], $rRow['confidence']] = self::score($rRow);
 		}
 		unset($rRow);
@@ -177,8 +184,9 @@ final class SourceHealthCalculator {
 	 * Score 0–100 for one source, or null when nothing is known about it: the
 	 * chance it comes up times the chance it stays up, cut by quality problems.
 	 *
-	 *   start     (starts + 1) / (attempts + 1)        one assumed success, so one
-	 *                                                  missed start is not "0%"
+	 *   start     (starts + probes ok + 1)             one assumed success, so one
+	 *             / (attempts + probes + 1)            missed start is not "0%"; a
+	 *                                                  probe is a start attempt too
 	 *   stability 1 − e^(−MTBF / 6h), where            MTBF 6 h ≈ 0.63, 24 h ≈ 0.98;
 	 *             MTBF = (hours + 6) / (incidents + 1) the prior keeps a few clean
 	 *                                                  minutes from reading as bad;
@@ -194,12 +202,12 @@ final class SourceHealthCalculator {
 	 * @return array{0: ?int, 1: string} [score, confidence: none|low|medium|high]
 	 */
 	public static function score(array $rRow): array {
-		$rAttempts = (int) $rRow['starts'] + (int) $rRow['start_fails'];
+		$rAttempts = (int) $rRow['starts'] + (int) $rRow['start_fails'] + (int) ($rRow['probe_total'] ?? 0);
 		$rHours = ((int) $rRow['uptime_sec']) / 3600;
 		if ($rAttempts === 0 && $rHours <= 0) {
 			return [null, 'none'];
 		}
-		$rStart = ((int) $rRow['starts'] + 1) / ($rAttempts + 1);
+		$rStart = ((int) $rRow['starts'] + (int) ($rRow['probe_ok'] ?? 0) + 1) / ($rAttempts + 1);
 		$rMtbf = ($rHours + self::MTBF_PRIOR_HOURS) / ((int) ($rRow['incidents'] ?? $rRow['failures']) + 1);
 		$rStability = 1 - exp(-$rMtbf / self::STABILITY_SCALE_HOURS);
 		$rQuality = 1 / (1 + ((int) $rRow['quality_issues']) / ($rHours + 1));
@@ -216,7 +224,26 @@ final class SourceHealthCalculator {
 	}
 
 	/**
-	 * Source indexes best first: score descending, unknown last, ties keep the
+	 * What the suggested order goes by: the score, discounted by how little it
+	 * rests on. A score is partly assumption (the priors); a source tried a few
+	 * times, or never on air for an hour, must not overtake one measured for
+	 * days just because nothing bad has been seen of it yet.
+	 *
+	 * @param array<string, mixed> $rRow
+	 */
+	public static function rankValue(array $rRow): float {
+		if ($rRow['score'] === null) {
+			return -1.0;
+		}
+		$rWeight = ['high' => 1.0, 'medium' => 0.85, 'low' => 0.6][$rRow['confidence']] ?? 0.6;
+		if ((int) $rRow['uptime_sec'] < 3600) {
+			$rWeight *= 0.7; // how long it stays up is not measured yet: the prior stands in
+		}
+		return $rRow['score'] * $rWeight;
+	}
+
+	/**
+	 * Source indexes best first by rankValue(), unknown last, ties keep the
 	 * operator's order. A suggestion only — nothing here changes how streams run.
 	 *
 	 * @param list<array<string, mixed>> $rRows output of compute()
@@ -224,9 +251,9 @@ final class SourceHealthCalculator {
 	 */
 	public static function suggestedOrder(array $rRows): array {
 		usort($rRows, static function (array $a, array $b): int {
-			$rA = $a['score'] ?? -1;
-			$rB = $b['score'] ?? -1;
-			return $rA === $rB ? $a['index'] <=> $b['index'] : $rB <=> $rA;
+			$rA = self::rankValue($a);
+			$rB = self::rankValue($b);
+			return abs($rA - $rB) < 0.001 ? $a['index'] <=> $b['index'] : $rB <=> $rA;
 		});
 		return array_map(static fn (array $r): int => (int) $r['index'], $rRows);
 	}

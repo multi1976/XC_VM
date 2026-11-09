@@ -30,16 +30,33 @@ final class SourceHealthTab {
 			$rStreamID = (int) $rStream['id'];
 			$rEvents = SourceHealthRepository::events($rStreamID, $rFrom);
 			$rRunning = SourceHealthRepository::running($rStreamID);
-			$rRows = SourceHealthCalculator::compute($rSources, $rEvents, $rFrom, $rNow, $rRunning);
+			$rDayFrom = max($rFrom, $rNow - 86400);
+			$rRows = SourceHealthCalculator::compute($rSources, $rEvents, $rFrom, $rNow, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rFrom));
 			// The same log read over the last day only: what the source is like now.
-			$rRecent = array_column(SourceHealthCalculator::compute($rSources, $rEvents, max($rFrom, $rNow - 86400), $rNow, $rRunning), null, 'index');
+			$rRecent = array_column(SourceHealthCalculator::compute($rSources, $rEvents, $rDayFrom, $rNow, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rDayFrom)), null, 'index');
+			$rProbing = SourceHealthRepository::probeEnabled($rStreamID);
 			$rProfiles = SourceHealthRepository::profiles($rStreamID);
 		} catch (\Throwable $e) {
 			error_log('source-health: ' . $e->getMessage());
 			return self::note('The report could not be built: ' . $e->getMessage());
 		}
 
-		return self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow) . self::timeline($rRows, $rFrom, $rNow);
+		return self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow) . self::timeline($rRows, $rFrom, $rNow);
+	}
+
+	/** The opt-in for active probes of this stream's sources, saved at once (not with the form). */
+	private static function probeSwitch(int $rStreamID, bool $rOn): string {
+		return '<div class="form-check form-switch mb-3">'
+			. '<input class="form-check-input" type="checkbox" id="sh-probe" ' . ($rOn ? 'checked' : '') . ' data-stream="' . $rStreamID . '">'
+			. '<label class="form-check-label" for="sh-probe"><strong>Probe every source</strong> — test each source on its own every '
+			. intdiv(SourceProber::INTERVAL_SEC, 60) . ' minutes from the main server, so backups are measured as well as the source on air '
+			. '(one short connection reading ' . SourceProber::PROBE_READ_SEC . ' s; never the source on air, nor one whose provider account a live stream is using). '
+			. '<span class="text-muted" id="sh-probe-state">' . ($rOn ? 'On.' : 'Off.') . '</span></label></div>'
+			. '<script>(function(){var c=document.getElementById("sh-probe");if(!c||c.dataset.bound){return;}c.dataset.bound=1;'
+			. 'c.addEventListener("change",function(){var s=document.getElementById("sh-probe-state");s.textContent="Saving…";'
+			. 'jQuery.post("./api?action=source_health_probe",{stream_id:c.dataset.stream,enabled:c.checked?1:0},function(r){'
+			. 's.textContent=(r&&r.result)?(c.checked?"On: first results within 5–10 minutes.":"Off."):"Could not save.";},"json")'
+			. '.fail(function(){s.textContent="Could not save.";});});})();</script>';
 	}
 
 	/**
@@ -118,7 +135,7 @@ final class SourceHealthTab {
 		}
 		$rHtml .= '<p class="text-muted mb-2">From ' . $h(date('Y-m-d H:i', $rFrom)) . ' to now, all servers. Read-only: nothing here changes how the stream runs.</p>';
 		$rHtml .= '<div class="table-responsive"><table class="table table-sm table-hover mb-2"><thead><tr>'
-			. '<th>#</th><th>Source</th><th class="text-center">Score</th><th class="text-center" title="The same figures over the last 24 hours only">Last 24h</th><th class="text-center">Starts / failed</th>'
+			. '<th>#</th><th>Source</th><th class="text-center">Score</th><th class="text-center" title="The same figures over the last 24 hours only">Last 24h</th><th class="text-center" title="Active probes in the report window: successful / made, median time to open, read speed">Probes</th><th class="text-center">Starts / failed</th>'
 			. '<th class="text-center">Failures</th><th class="text-center" title="Failures less than ' . intdiv(SourceHealthCalculator::INCIDENT_GAP_SEC, 60) . ' minutes apart count as one incident (one outage)">Incidents</th>'
 			. '<th class="text-center">Quality issues</th><th class="text-center">On air</th>'
 			. '<th class="text-center" title="Mean time on air between incidents">MTBF</th><th>Last failure</th><th>Output profile</th></tr></thead><tbody>';
@@ -132,6 +149,7 @@ final class SourceHealthTab {
 				. '<td><code title="' . $h(self::mask($rRow['source'])) . '">' . $h(self::mask($rRow['source'])) . '</code></td>'
 				. '<td class="text-center">' . self::scoreBadge($rRow['score'], (string) $rRow['confidence']) . '</td>'
 				. '<td class="text-center">' . self::recent($rRecent[$rRow['index']] ?? null) . '</td>'
+				. '<td class="text-center">' . self::probes($rRow['probe'] ?? null) . '</td>'
 				. '<td class="text-center">' . (int) $rRow['starts'] . ' / ' . (int) $rRow['start_fails'] . '</td>'
 				. '<td class="text-center">' . (int) $rRow['failures'] . '</td>'
 				. '<td class="text-center">' . (int) $rRow['incidents'] . '</td>'
@@ -142,7 +160,7 @@ final class SourceHealthTab {
 				. '<td>' . ($rProfile !== null
 					? '<span class="badge bg-label-secondary">' . $h($rGroup) . '</span> ' . $h($rProfile['label'])
 						. ((int) ($rProfile['bitrate'] ?? 0) > 0 ? ' <span class="text-muted">· ' . round(((int) $rProfile['bitrate']) / 1000, 1) . ' Mbps</span>' : '')
-					: '<span class="text-muted">not seen on air yet</span>')
+					: (($rRow['probe']['label'] ?? '') !== '' ? $h($rRow['probe']['label']) . ' <span class="text-muted">(from probes)</span>' : '<span class="text-muted">not seen on air yet</span>'))
 				. '</td></tr>';
 		}
 		$rHtml .= '</tbody></table></div>';
@@ -160,6 +178,7 @@ final class SourceHealthTab {
 		}
 		$rHtml .= '<p class="text-muted small mb-0">Score 0–100 = chance the source starts × chance it stays up (time between incidents; 6 h ≈ 63, 24 h ≈ 98) × quality issues per hour. '
 			. 'Failures less than ' . intdiv(SourceHealthCalculator::INCIDENT_GAP_SEC, 60) . ' minutes apart are one incident: a burst of retries during one outage counts once. '
+			. 'Probes count as start attempts. The suggested order discounts scores that rest on little data (low confidence, or under an hour on air), so an untried source does not overtake a measured one. '
 			. 'Low confidence means little data. Profiles are recorded every 5 minutes while a source is on air.</p>';
 		return $rHtml;
 	}
@@ -170,7 +189,26 @@ final class SourceHealthTab {
 			return '<span class="text-muted">–</span>';
 		}
 		return self::scoreBadge($rRow['score'], (string) $rRow['confidence'])
-			. '<br><small class="text-muted">' . (int) $rRow['incidents'] . ' inc.' . ($rRow['start_fails'] > 0 ? ' · ' . (int) $rRow['start_fails'] . ' failed starts' : '') . '</small>';
+			. '<br><small class="text-muted">on air ' . ($rRow['uptime_sec'] > 0 ? self::duration((int) $rRow['uptime_sec']) : '0') . ' · ' . (int) $rRow['incidents'] . ' inc.'
+			. ($rRow['start_fails'] > 0 ? ' · ' . (int) $rRow['start_fails'] . ' failed starts' : '')
+			. ($rRow['probe_total'] > 0 ? ' · probes ' . (int) $rRow['probe_ok'] . '/' . (int) $rRow['probe_total'] : '') . '</small>';
+	}
+
+	/** Probes cell: "46/48 ok", median open time and read speed; the last failure or skip on hover. */
+	private static function probes(?array $rProbe): string {
+		if ($rProbe === null) {
+			return '<span class="text-muted">–</span>';
+		}
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rLast = $rProbe['last_error'] !== '' ? ($rProbe['last_kind'] === 'skip' ? 'last: not probed, ' : 'last: ') . $rProbe['last_error'] : 'last probe ok';
+		if ($rProbe['total'] === 0) {
+			return '<span class="text-muted" title="' . $h($rLast) . '">not probed<br><small>' . $h($rProbe['last_error']) . '</small></span>';
+		}
+		$rRate = $rProbe['ok'] / $rProbe['total'];
+		$rClass = $rRate >= 0.95 ? 'text-success' : ($rRate >= 0.7 ? 'text-warning' : 'text-danger');
+		return '<span class="' . $rClass . '" title="' . $h($rLast) . '">' . (int) $rProbe['ok'] . '/' . (int) $rProbe['total'] . ' ok</span>'
+			. ($rProbe['open_ms'] !== null ? '<br><small class="text-muted">open ' . round($rProbe['open_ms'] / 1000, 1) . ' s' . ($rProbe['speed'] !== null ? ' · ' . $rProbe['speed'] . 'x' : '') . '</small>' : '')
+			. ($rProbe['last_kind'] === 'probe' && !$rProbe['last_ok'] ? '<br><small class="text-danger">' . $h($rProbe['last_error']) . '</small>' : '');
 	}
 
 	private static function scoreBadge(?int $rScore, string $rConfidence): string {

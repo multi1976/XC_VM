@@ -130,7 +130,153 @@ final class SourceHealthRepository {
 	public static function deleteForStreams(array $rStreamIDs): void {
 		$rIDs = array_values(array_unique(array_filter(array_map('intval', $rStreamIDs), static fn (int $id): bool => $id > 0)));
 		foreach (array_chunk($rIDs, 500) as $rChunk) {
-			self::db()->query('DELETE FROM `source_health_profiles` WHERE `stream_id` IN (' . implode(',', $rChunk) . ')');
+			foreach (['source_health_profiles', 'source_health_probes', 'source_health_probe_streams'] as $rTable) {
+				self::db()->query('DELETE FROM `' . $rTable . '` WHERE `stream_id` IN (' . implode(',', $rChunk) . ')');
+			}
 		}
+	}
+
+	// ---- active probes ----
+
+	/** Probe results are kept this long (the report window). */
+	public const PROBE_TTL_SEC = 7 * 86400;
+
+	public static function probeEnabled(int $rStreamID): bool {
+		return (bool) self::db()->fetchValue('SELECT 1 FROM `source_health_probe_streams` WHERE `stream_id` = ?', $rStreamID);
+	}
+
+	public static function setProbe(int $rStreamID, bool $rEnabled, ?int $rUserID): void {
+		if ($rEnabled) {
+			self::db()->query('INSERT IGNORE INTO `source_health_probe_streams` (`stream_id`, `enabled_at`, `enabled_by`) VALUES (?, ?, ?)', $rStreamID, time(), $rUserID);
+		} else {
+			self::db()->query('DELETE FROM `source_health_probe_streams` WHERE `stream_id` = ?', $rStreamID);
+		}
+	}
+
+	/** @return list<int> streams whose sources are probed */
+	public static function probeStreams(): array {
+		return array_map('intval', self::db()->fetchColumn('SELECT `stream_id` FROM `source_health_probe_streams`') ?: []);
+	}
+
+	/**
+	 * Every source of the given live streams.
+	 *
+	 * @param list<int> $rStreamIDs
+	 * @return list<array{stream_id:int, source:string}>
+	 */
+	public static function probeCandidates(array $rStreamIDs): array {
+		if ($rStreamIDs === []) {
+			return [];
+		}
+		$rRows = self::db()->fetchAll('SELECT `id`, `stream_source` FROM `streams` WHERE `type` = 1 AND `id` IN (' . implode(',', array_map('intval', $rStreamIDs)) . ')') ?: [];
+		$rOut = [];
+		foreach ($rRows as $rRow) {
+			foreach ((array) json_decode((string) $rRow['stream_source'], true) as $rSource) {
+				if (is_string($rSource) && trim($rSource) !== '') {
+					$rOut[] = ['stream_id' => (int) $rRow['id'], 'source' => trim($rSource)];
+				}
+			}
+		}
+		return $rOut;
+	}
+
+	/**
+	 * @param list<int> $rStreamIDs
+	 * @return array<string, int> "streamId:md5" => last probe or skip time
+	 */
+	public static function lastProbes(array $rStreamIDs): array {
+		if ($rStreamIDs === []) {
+			return [];
+		}
+		$rRows = self::db()->fetchAll('SELECT `stream_id`, `source_hash`, MAX(`checked_at`) AS `last` FROM `source_health_probes` WHERE `stream_id` IN (' . implode(',', array_map('intval', $rStreamIDs)) . ') GROUP BY `stream_id`, `source_hash`') ?: [];
+		$rLast = [];
+		foreach ($rRows as $rRow) {
+			$rLast[$rRow['stream_id'] . ':' . $rRow['source_hash']] = (int) $rRow['last'];
+		}
+		return $rLast;
+	}
+
+	/** @return list<string> every source on air on the panel right now (all streams, all servers) */
+	public static function onAirSources(): array {
+		return array_values(array_unique(array_map('trim', self::db()->fetchColumn(
+			'SELECT `current_source` FROM `streams_servers` WHERE `pid` > 0 AND `stream_status` = 0 AND `current_source` IS NOT NULL AND `current_source` <> \'\''
+		) ?: [])));
+	}
+
+	/**
+	 * The stream's fetch identity, as the panel's own puller uses it.
+	 *
+	 * @return array{user_agent?:string, http_proxy?:string, cookies?:string, headers?:string}
+	 */
+	public static function fetchOptions(int $rStreamID): array {
+		try {
+			$rArgs = \XcVm\Domain\Stream\StreamSource::arguments($rStreamID, true);
+			$rSource = \XcVm\Streaming\Fanout\FanoutClient::buildSource([], $rArgs);
+		} catch (\Throwable $e) {
+			return [];
+		}
+		return array_filter([
+			'user_agent' => (string) $rSource['ua'],
+			'http_proxy' => $rSource['proxy'] !== '' ? 'http://' . $rSource['proxy'] : '',
+			'cookies'    => (string) $rSource['cookie'],
+			'headers'    => (string) ($rArgs['headers']['value'] ?? ''),
+		], static fn (string $v): bool => $v !== '');
+	}
+
+	/** @param array{ok: bool, open_ms: ?int, speed: ?float, label: string, error: string} $rResult */
+	public static function saveProbe(int $rStreamID, string $rSource, array $rResult, int $rNow): void {
+		self::db()->query(
+			'INSERT INTO `source_health_probes` (`stream_id`, `source_hash`, `checked_at`, `kind`, `ok`, `open_ms`, `speed`, `label`, `error`) VALUES (?, ?, ?, \'probe\', ?, ?, ?, ?, ?)',
+			$rStreamID, md5($rSource), $rNow, $rResult['ok'] ? 1 : 0, $rResult['open_ms'], $rResult['speed'],
+			mb_substr($rResult['label'], 0, 190), mb_substr($rResult['error'], 0, 250)
+		);
+	}
+
+	/** A probe that was due but not made, and why: shown in the tab, counted as no result. */
+	public static function saveSkip(int $rStreamID, string $rSource, string $rReason, int $rNow): void {
+		self::db()->query(
+			'INSERT INTO `source_health_probes` (`stream_id`, `source_hash`, `checked_at`, `kind`, `ok`, `error`) VALUES (?, ?, ?, \'skip\', 0, ?)',
+			$rStreamID, md5($rSource), $rNow, mb_substr($rReason, 0, 250)
+		);
+	}
+
+	/**
+	 * Probe results per source since $rFrom.
+	 *
+	 * @return array<string, array{ok:int, total:int, open_ms:?int, speed:?float, last_at:int, last_ok:bool, last_error:string, last_kind:string, label:string}>
+	 */
+	public static function probeStats(int $rStreamID, int $rFrom): array {
+		$rRows = self::db()->fetchAll('SELECT `source_hash`, `checked_at`, `kind`, `ok`, `open_ms`, `speed`, `label`, `error` FROM `source_health_probes` WHERE `stream_id` = ? AND `checked_at` >= ? ORDER BY `checked_at` ASC', $rStreamID, $rFrom) ?: [];
+		$rStats = [];
+		$rOpen = [];
+		foreach ($rRows as $rRow) {
+			$rHash = (string) $rRow['source_hash'];
+			$rStats[$rHash] ??= ['ok' => 0, 'total' => 0, 'open_ms' => null, 'speed' => null, 'last_at' => 0, 'last_ok' => false, 'last_error' => '', 'last_kind' => '', 'label' => ''];
+			$rStats[$rHash]['last_at'] = (int) $rRow['checked_at'];
+			$rStats[$rHash]['last_kind'] = (string) $rRow['kind'];
+			$rStats[$rHash]['last_error'] = (string) $rRow['error'];
+			if ($rRow['kind'] !== 'probe') {
+				continue;
+			}
+			$rStats[$rHash]['total']++;
+			$rStats[$rHash]['last_ok'] = (bool) $rRow['ok'];
+			if ((int) $rRow['ok'] === 1) {
+				$rStats[$rHash]['ok']++;
+				$rOpen[$rHash][] = (int) $rRow['open_ms'];
+				$rStats[$rHash]['speed'] = $rRow['speed'] !== null ? (float) $rRow['speed'] : null;
+			}
+			if ((string) $rRow['label'] !== '') {
+				$rStats[$rHash]['label'] = (string) $rRow['label'];
+			}
+		}
+		foreach ($rOpen as $rHash => $rTimes) {
+			sort($rTimes);
+			$rStats[$rHash]['open_ms'] = $rTimes[intdiv(count($rTimes), 2)];
+		}
+		return $rStats;
+	}
+
+	public static function pruneProbes(int $rNow): void {
+		self::db()->query('DELETE FROM `source_health_probes` WHERE `checked_at` < ?', $rNow - self::PROBE_TTL_SEC);
 	}
 }

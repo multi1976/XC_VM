@@ -5,9 +5,10 @@ namespace XcVm\Module\SourceHealth;
 use XcVm\Cli\CommandInterface;
 use XcVm\Cli\CronTrait;
 use XcVm\Core\Cluster\NodeRole;
+use XcVm\Streaming\Codec\FfmpegPaths;
 
 /**
- * `cron:source_health` — CLI wrapper of SourceHealthCron (every 5 minutes, MAIN only).
+ * `cron:source_health` — CLI wrapper of SourceHealthCron and SourceProber (every 5 minutes, MAIN only).
  * Runs as xc_vm; started as root (from root's crontab) it re-runs itself as xc_vm.
  */
 class SourceHealthCronJob implements CommandInterface {
@@ -37,6 +38,8 @@ class SourceHealthCronJob implements CommandInterface {
 		}
 		$this->initCron('XC_VM[Source Health]');
 		SourceHealthCron::run(time());
+		// Active probes of the streams the admin opted in (none by default).
+		SourceProber::run(time(), (string) FfmpegPaths::probe(), (string) FfmpegPaths::cpu());
 		return 0;
 	}
 }
