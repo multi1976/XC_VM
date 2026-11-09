@@ -55,16 +55,17 @@ final class SourceHealthCalculatorTest extends TestCase {
 		$this->assertFalse($rRows[0]['running']);
 	}
 
-	public function testUnexplainedRestartIsAFailureButAPlannedSwitchIsNot(): void {
+	public function testASilentEndIsNotAFailureAndAPlannedSwitchIsCountedAsSuch(): void {
 		$rRows = self::rows([
 			self::ev(1, 'STREAM_START', self::A, 1000),
-			self::ev(1, 'STREAM_RESTART', self::A, 2000),   // no reason given: A dropped
+			self::ev(1, 'STREAM_START', self::A, 2000),     // new supervision (daemon restart): no reason logged
 			self::ev(1, 'PRIORITY_SWITCH', self::B, 3000),  // planned move to B
 			self::ev(1, 'STREAM_RESTART', self::B, 3001),
 			self::ev(1, 'STREAM_STOP', '', 5001),
 		]);
 
-		$this->assertSame(1, $rRows[0]['failures']);
+		$this->assertSame(0, $rRows[0]['failures']);
+		$this->assertSame(2, $rRows[0]['starts']);
 		$this->assertSame(1, $rRows[0]['switched_away']);
 		$this->assertSame(2001, $rRows[0]['uptime_sec']);
 		$this->assertSame(0, $rRows[1]['failures']);
@@ -126,6 +127,27 @@ final class SourceHealthCalculatorTest extends TestCase {
 
 		$this->assertCount(1, $rRows);
 		$this->assertSame(0, $rRows[0]['failures']);
+	}
+
+	/** The figures from a real panel (2026-11-09): the score must rank them sensibly. */
+	public function testScoreOnRealFigures(): void {
+		$rScore = static fn (int $rStarts, int $rFails, int $rFailures, int $rUptime): ?int => SourceHealthCalculator::score([
+			'starts' => $rStarts, 'start_fails' => $rFails, 'failures' => $rFailures, 'quality_issues' => 0, 'uptime_sec' => $rUptime,
+		])[0];
+		$rDash = $rScore(25, 3, 25, 6 * 86400 + 23 * 3600);  // 25 drops in a week
+		$rWebstar = $rScore(29, 18, 21, 5 * 86400 + 20 * 3600);
+		$rBandook = $rScore(18, 14, 14, 27 * 3600);
+		$rLalelalja = $rScore(13, 2, 8, 50 * 60);         // drops every 6 minutes
+		$rNeverUp = $rScore(0, 8, 0, 0);
+		$rFewCleanMinutes = $rScore(3, 0, 0, 15 * 60);
+
+		$this->assertGreaterThan($rWebstar, $rDash);
+		$this->assertGreaterThan($rBandook, $rWebstar);
+		$this->assertGreaterThan($rLalelalja, $rBandook);
+		$this->assertLessThan(20, $rLalelalja);
+		$this->assertLessThan(10, $rNeverUp);
+		$this->assertGreaterThan(50, $rFewCleanMinutes);
+		$this->assertLessThan(80, $rDash);                 // not "excellent" with 3 drops a day
 	}
 
 	public function testScoreAndSuggestedOrder(): void {

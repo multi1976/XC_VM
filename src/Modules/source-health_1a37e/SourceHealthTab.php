@@ -105,7 +105,7 @@ final class SourceHealthTab {
 			$rHtml .= '<p class="text-muted mb-1">Sources in the same profile group (same letter) can replace each other with only a timestamp jump. '
 				. 'A switch between groups makes players re-initialise their decoder, which many set-top boxes handle badly.</p>';
 		}
-		$rHtml .= '<p class="text-muted small mb-0">Score 0–100: start success 35%, stability (time between failures) 45%, quality issues per hour 20%. '
+		$rHtml .= '<p class="text-muted small mb-0">Score 0–100 = chance the source starts × chance it stays up (time between failures; 6 h ≈ 63, 24 h ≈ 98) × quality issues per hour. '
 			. 'Low confidence means little data. Profiles are recorded every 5 minutes while a source is on air.</p>';
 		return $rHtml;
 	}

@@ -12,14 +12,18 @@ namespace XcVm\Module\SourceHealth;
  * its events are a sequence of their own):
  *
  *   STREAM_START / STREAM_RESTART (S)  S became the running source. If another run
- *                                      was still open and nothing said why it ended,
- *                                      that run counts as a failure of its source.
- *   STREAM_FAILED (S)                  the open run ended in a failure.
+ *                                      was still open and nothing said why it ended
+ *                                      (a daemon or server restart starts a new
+ *                                      supervision with STREAM_START), that run just
+ *                                      ends: it is not charged to its source.
+ *   STREAM_FAILED (S)                  the open run ended in a failure (both the
+ *                                      fanout daemon and the legacy monitor log it
+ *                                      whenever the encoder dies on its own).
  *   STREAM_START_FAIL (S)              an attempt on S did not come up.
- *   PRIORITY_SWITCH / FORCE_SOURCE     a planned move: the run that ends next is not
- *   AUTO_RESTART                       charged as a failure.
- *   AUDIO_LOSS / FPS_DROP_THRESHOLD /  a quality problem on the running source; the
- *   FFMPEG_ERROR                       restart it causes is not charged twice.
+ *   PRIORITY_SWITCH / FORCE_SOURCE     a planned move away from the running source
+ *   AUTO_RESTART                       (counted as "switched away", not a failure).
+ *   AUDIO_LOSS / FPS_DROP_THRESHOLD /  a quality problem on the running source.
+ *   FFMPEG_ERROR
  *   STREAM_STOP                        the operator stopped it: the run ends cleanly.
  *
  * Only events inside the window [from, now] are counted. The repository may pass
@@ -29,7 +33,7 @@ namespace XcVm\Module\SourceHealth;
 final class SourceHealthCalculator {
 	/** Actions that open a run. */
 	private const OPEN = ['STREAM_START', 'STREAM_RESTART'];
-	/** Actions after which the next end of the run is planned, not a failure. */
+	/** Actions that move the stream off its running source on purpose. */
 	private const PLANNED = ['PRIORITY_SWITCH', 'FORCE_SOURCE', 'AUTO_RESTART'];
 	/** Actions that are a quality problem of the source that is running. */
 	private const QUALITY = ['AUDIO_LOSS', 'FPS_DROP_THRESHOLD', 'FFMPEG_ERROR'];
@@ -53,7 +57,7 @@ final class SourceHealthCalculator {
 			$rStats[$rKey] = self::blank($i, $rKey);
 		}
 
-		/** @var array<int, array{src:string, since:int, planned:bool}|null> $rOpen */
+		/** @var array<int, array{src:string, since:int}|null> $rOpen */
 		$rOpen = [];
 		/** @var array<int, int> $rLast last event time per server */
 		$rLast = [];
@@ -69,9 +73,9 @@ final class SourceHealthCalculator {
 
 			if (in_array($rAction, self::OPEN, true)) {
 				if ($rRun !== null) {
-					self::close($rStats, $rRun, $rTime, $rFrom, !$rRun['planned'] && $rInWindow);
+					self::close($rStats, $rRun, $rTime, $rFrom, false);
 				}
-				$rOpen[$rServer] = ['src' => $rSrc, 'since' => $rTime, 'planned' => false];
+				$rOpen[$rServer] = ['src' => $rSrc, 'since' => $rTime];
 				if ($rInWindow && isset($rStats[$rSrc])) {
 					$rStats[$rSrc]['starts']++;
 					$rStats[$rSrc]['last_active'] = max($rStats[$rSrc]['last_active'], $rTime);
@@ -107,11 +111,8 @@ final class SourceHealthCalculator {
 					break;
 
 				case in_array($rAction, self::PLANNED, true):
-					if ($rRun !== null) {
-						$rOpen[$rServer]['planned'] = true;
-						if ($rAction !== 'AUTO_RESTART' && isset($rStats[$rRun['src']])) {
-							$rStats[$rRun['src']]['switched_away']++;
-						}
+					if ($rRun !== null && $rAction !== 'AUTO_RESTART' && isset($rStats[$rRun['src']])) {
+						$rStats[$rRun['src']]['switched_away']++;
 					}
 					break;
 
@@ -119,9 +120,6 @@ final class SourceHealthCalculator {
 					$rBad = $rSrc !== '' ? $rSrc : ($rRun['src'] ?? '');
 					if (isset($rStats[$rBad])) {
 						$rStats[$rBad]['quality_issues']++;
-					}
-					if ($rRun !== null) {
-						$rOpen[$rServer]['planned'] = true; // counted here, not again as a failure
 					}
 					break;
 
@@ -159,12 +157,24 @@ final class SourceHealthCalculator {
 		return array_values($rStats);
 	}
 
+	/** Prior for the time between failures: one failure in this many hours. */
+	public const MTBF_PRIOR_HOURS = 6.0;
+	/** Time between failures at which stability reaches 1 − 1/e ≈ 0.63. */
+	public const STABILITY_SCALE_HOURS = 6.0;
+
 	/**
-	 * Score 0–100 for one source, or null when nothing is known about it.
+	 * Score 0–100 for one source, or null when nothing is known about it: the
+	 * chance it comes up times the chance it stays up, cut by quality problems.
 	 *
-	 *   start rate  (35%)  starts / (starts + failed starts)
-	 *   stability   (45%)  1 − e^(−MTBF / 2h): 2 h between failures ≈ 0.63, 6 h ≈ 0.95
-	 *   quality     (20%)  1 / (1 + quality problems per hour on air)
+	 *   start     (starts + 1) / (attempts + 1)        one assumed success, so one
+	 *                                                  missed start is not "0%"
+	 *   stability 1 − e^(−MTBF / 6h), where            MTBF 6 h ≈ 0.63, 24 h ≈ 0.98;
+	 *             MTBF = (hours + 6) / (failures + 1)  the prior keeps a few clean
+	 *                                                  minutes from reading as bad
+	 *   quality   1 / (1 + issues / (hours + 1))
+	 *
+	 * Multiplied, not averaged: a source that starts every time but drops every
+	 * few minutes is not half good.
 	 *
 	 * @param array<string, mixed> $rRow
 	 * @return array{0: ?int, 1: string} [score, confidence: none|low|medium|high]
@@ -175,11 +185,11 @@ final class SourceHealthCalculator {
 		if ($rAttempts === 0 && $rHours <= 0) {
 			return [null, 'none'];
 		}
-		$rStartRate = $rAttempts > 0 ? ((int) $rRow['starts']) / $rAttempts : 1.0;
-		$rMtbf = $rHours / max(1, (int) $rRow['failures']);
-		$rStability = 1 - exp(-$rMtbf / 2);
-		$rQuality = 1 / (1 + ($rHours > 0 ? ((int) $rRow['quality_issues']) / $rHours : (int) $rRow['quality_issues']));
-		$rScore = (int) round(100 * (0.35 * $rStartRate + 0.45 * $rStability + 0.20 * $rQuality));
+		$rStart = ((int) $rRow['starts'] + 1) / ($rAttempts + 1);
+		$rMtbf = ($rHours + self::MTBF_PRIOR_HOURS) / ((int) $rRow['failures'] + 1);
+		$rStability = 1 - exp(-$rMtbf / self::STABILITY_SCALE_HOURS);
+		$rQuality = 1 / (1 + ((int) $rRow['quality_issues']) / ($rHours + 1));
+		$rScore = (int) round(100 * $rStart * $rStability * $rQuality);
 
 		if ($rHours >= 24 || $rAttempts >= 10) {
 			$rConfidence = 'high';
@@ -223,7 +233,7 @@ final class SourceHealthCalculator {
 	 * explained the end, charge a failure to its source.
 	 *
 	 * @param array<string, array<string, mixed>> $rStats
-	 * @param array{src:string, since:int, planned:bool} $rRun
+	 * @param array{src:string, since:int} $rRun
 	 */
 	private static function close(array &$rStats, array $rRun, int $rUntil, int $rFrom, bool $rFailure): void {
 		if (!isset($rStats[$rRun['src']])) {
