@@ -3,7 +3,7 @@
     "title": "Channel Audit",
     "hash_id": "4eeffc1ef97e1970ebe3f6ed4b86a293",
     "description": "Strict check of the video files of a folder or created channel against an admin-defined standard (codec, resolution, frame rate, GOP, audio, timestamps, optional full decode), before the channel is built. Read-only.",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "requires_core": "",
     "environment": "main",
     "priority": 0,

@@ -152,6 +152,8 @@ final class PacketAnalyzer {
 		$rDuplicates = 0;
 		$rMaxStep = 0.0;
 		$rMaxStepAt = null;
+		$rMaxDev = 0.0;
+		$rMaxDevAt = null;
 		if ($rFrameDuration !== null) {
 			$rTolerance = max(0.0015, $rFrameDuration * 0.05);
 			foreach ($rSteps as $i => $rStep) {
@@ -159,6 +161,10 @@ final class PacketAnalyzer {
 					$rDuplicates++;
 				} elseif (abs($rStep - $rFrameDuration) > $rTolerance) {
 					$rIrregular++;
+				}
+				if (abs($rStep - $rFrameDuration) > $rMaxDev) {
+					$rMaxDev = abs($rStep - $rFrameDuration);
+					$rMaxDevAt = $this->rVideoPts[$i];
 				}
 				if ($rStep > $rMaxStep) {
 					$rMaxStep = $rStep;
@@ -185,6 +191,8 @@ final class PacketAnalyzer {
 				'duplicates'    => $rDuplicates,
 				'max_step'      => $rMaxStep,
 				'max_step_at'   => $rMaxStepAt,
+				'max_dev'       => $rMaxDev,
+				'max_dev_at'    => $rMaxDevAt,
 				'dts_backwards' => $this->rDtsBackwards,
 				'no_timestamp'  => $this->rVideoNoTimestamp,
 				'corrupt'       => $this->rCorrupt,

@@ -1,0 +1,3 @@
+INSERT INTO `channel_audit_standards` (`name`, `spec`, `created_at`, `updated_at`)
+SELECT 'HD Ready 25p, joined chunks (H.264 / AAC stereo)', '{"video_codec":"h264","video_profile":"","width":1280,"height":720,"sar":"1:1","pix_fmt":"yuv420p","fps":"25","scan":"progressive","gop":100,"gop_mode":"max","audio_codec":"aac","audio_rate":48000,"audio_channels":2,"audio_streams":1,"av_start_ms":100,"av_end_ms":100,"max_glitches":10,"max_glitch_ms":150}', UNIX_TIMESTAMP(), UNIX_TIMESTAMP()
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `channel_audit_standards` WHERE `name` = 'HD Ready 25p, joined chunks (H.264 / AAC stereo)');

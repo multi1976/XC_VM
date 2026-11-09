@@ -127,19 +127,22 @@ $h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
                         <div class="col-md-2"><label class="form-label">Pixel format</label><input class="form-control" name="pix_fmt" placeholder="yuv420p"></div>
                         <div class="col-md-2"><label class="form-label">SAR</label><input class="form-control" name="sar" placeholder="1:1"></div>
                         <div class="col-md-2"><label class="form-label">GOP <small class="text-body-secondary">(frames, 0 = any)</small></label><input class="form-control" type="number" name="gop"></div>
+                        <div class="col-md-2"><label class="form-label">GOP rule</label><select class="form-select" name="gop_mode"><option value="exact">exactly</option><option value="max">at most (shorter = warning)</option></select></div>
                         <div class="col-md-2"><label class="form-label">Audio codec</label><input class="form-control" name="audio_codec" placeholder="aac"></div>
                         <div class="col-md-2"><label class="form-label">Sample rate</label><input class="form-control" type="number" name="audio_rate"></div>
                         <div class="col-md-2"><label class="form-label">Channels</label><input class="form-control" type="number" name="audio_channels"></div>
                         <div class="col-md-2"><label class="form-label">Audio tracks</label><input class="form-control" type="number" name="audio_streams"></div>
                         <div class="col-md-3"><label class="form-label">Max A/V start gap (ms)</label><input class="form-control" type="number" name="av_start_ms"></div>
                         <div class="col-md-3"><label class="form-label">Max A/V end gap (ms)</label><input class="form-control" type="number" name="av_end_ms"></div>
+                        <div class="col-md-3"><label class="form-label">Tolerated timestamp glitches <small class="text-body-secondary">(per file)</small></label><input class="form-control" type="number" name="max_glitches"></div>
+                        <div class="col-md-3"><label class="form-label">…each at most (ms)</label><input class="form-control" type="number" name="max_glitch_ms"></div>
                     </div>
                     <div class="alert alert-danger mt-3 mb-0 d-none" id="ca-standard-error"></div>
                     <div class="mt-3">
                         <button type="submit" class="btn btn-primary">Save standard</button>
                         <button type="button" class="btn btn-label-secondary" id="ca-standard-new">New</button>
                     </div>
-                    <p class="text-body-secondary small mt-3 mb-0">Always checked as well, whatever the standard: one video track, the first frame a keyframe, timestamps in order, constant frame rate, no holes in the audio, and readable packets.</p>
+                    <p class="text-body-secondary small mt-3 mb-0">Always checked as well, whatever the standard: one video track, the first frame a keyframe, timestamps in order, constant frame rate, no holes in the audio, and readable packets. Tolerated glitches (0 = none, strict) let files joined by stream copy pass with a warning for the few small timestamp seams they carry; anything above the count or the size still fails.</p>
                 </form>
             </div>
         </div>
@@ -170,9 +173,9 @@ LayoutRenderer::renderFooter('admin');
         }
 
         function describe(sp) {
-            var v = sp.video_codec + (sp.video_profile ? ' ' + sp.video_profile : '') + ' ' + sp.width + 'x' + sp.height + ' ' + sp.fps + (sp.scan === 'progressive' ? 'p' : 'i') + ' ' + sp.pix_fmt + ' SAR ' + sp.sar + (parseInt(sp.gop, 10) > 0 ? ' GOP ' + sp.gop : '');
+            var v = sp.video_codec + (sp.video_profile ? ' ' + sp.video_profile : '') + ' ' + sp.width + 'x' + sp.height + ' ' + sp.fps + (sp.scan === 'progressive' ? 'p' : 'i') + ' ' + sp.pix_fmt + ' SAR ' + sp.sar + (parseInt(sp.gop, 10) > 0 ? ' GOP ' + (sp.gop_mode === 'max' ? '≤' : '') + sp.gop : '');
             var a = parseInt(sp.audio_streams, 10) === 0 ? 'no audio' : sp.audio_codec + ' ' + (sp.audio_rate / 1000) + 'k ' + sp.audio_channels + 'ch';
-            return v + ' · ' + a;
+            return v + ' · ' + a + (parseInt(sp.max_glitches, 10) > 0 ? ' · tolerates ' + sp.max_glitches + ' glitch(es) ≤ ' + sp.max_glitch_ms + ' ms' : '');
         }
 
         function badge(status) {

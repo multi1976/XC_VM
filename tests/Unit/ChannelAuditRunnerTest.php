@@ -61,11 +61,18 @@ final class ChannelAuditRunnerTest extends TestCase {
 		}
 	}
 
-	public function testTheSeededStandardIsInstalledOnce(): void {
-		$rStandards = AuditRepository::standards();
+	public function testTheSeededStandardsAreInstalledOnce(): void {
+		$rSchema = (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/channel-audit_*')[0] . '/database.sql');
+		foreach (array_filter(array_map('trim', explode(';', $rSchema))) as $rStatement) {
+			$this->rDb->exec($rStatement); // a second install over the first
+		}
+		$rStandards = array_column(AuditRepository::standards(), 'spec', 'name');
 
-		$this->assertCount(1, $rStandards);
-		$this->assertSame(1920, $rStandards[0]['spec']['width']);
+		$this->assertCount(2, $rStandards);
+		$this->assertSame(1920, $rStandards['Full HD 25p (H.264 / AAC stereo)']['width']);
+		$rChunks = $rStandards['HD Ready 25p, joined chunks (H.264 / AAC stereo)'];
+		$this->assertSame([1280, 720, 100, 'max', 10, 150], [$rChunks['width'], $rChunks['height'], $rChunks['gop'], $rChunks['gop_mode'], $rChunks['max_glitches'], $rChunks['max_glitch_ms']]);
+		$this->assertSame([], AuditStandard::normalize($rChunks)[1]);
 	}
 
 	public function testAChannelAuditRunsEveryItemAndCountsTheResults(): void {

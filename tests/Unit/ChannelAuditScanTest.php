@@ -135,6 +135,39 @@ final class ChannelAuditScanTest extends TestCase {
 		$this->assertContains('decode', self::failed($rDeep));
 	}
 
+	/**
+	 * Parts joined by stream copy (the concat demuxer, -c copy) carry small
+	 * seams: a short GOP at each join and a timestamp step or two. A strict
+	 * standard fails them; one with GOP "at most" and a glitch tolerance passes
+	 * them with warnings — and still fails a file whose seam is too big.
+	 */
+	public function testJoinedPartsPassATolerantStandardWithWarnings(): void {
+		$rList = self::$rDir . '/join.txt';
+		$rParts = [];
+		foreach (['p1.mp4' => '2.1', 'p2.mp4' => '1.7', 'p3.mp4' => '2.3'] as $rName => $rLength) {
+			$rPath = self::$rDir . '/' . $rName;
+			shell_exec(escapeshellarg(self::$rFfmpeg) . ' -v error -y -f lavfi -i testsrc2=size=320x180:rate=25 -f lavfi -i sine=sample_rate=48000 -t ' . $rLength
+				. ' -map 0:v -map 1:a -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 25 -keyint_min 25 -sc_threshold 0 -c:a aac -ac 2 -ar 48000 ' . escapeshellarg($rPath));
+			$rParts[] = "file '" . $rPath . "'";
+		}
+		file_put_contents($rList, implode("\n", $rParts) . "\n");
+		$rJoined = self::$rDir . '/joined.mkv';
+		shell_exec(escapeshellarg(self::$rFfmpeg) . ' -v error -y -f concat -safe 0 -i ' . escapeshellarg($rList) . ' -c copy ' . escapeshellarg($rJoined));
+
+		$rStrict = $this->scan($rJoined, self::spec(['av_end_ms' => 200]));
+		$this->assertContains('gop', self::failed($rStrict));
+
+		$rTolerant = $this->scan($rJoined, self::spec(['av_end_ms' => 200, 'gop_mode' => 'max', 'max_glitches' => 10, 'max_glitch_ms' => 150]));
+		$this->assertSame([], self::failed($rTolerant), json_encode($rTolerant['issues']));
+		$this->assertSame('warn', $rTolerant['status']);
+		$this->assertContains('gop', array_column($rTolerant['issues'], 1));
+
+		$rTooTight = $this->scan($rJoined, self::spec(['av_end_ms' => 200, 'gop_mode' => 'max', 'max_glitches' => 10, 'max_glitch_ms' => 0]));
+		$rGlitchy = array_intersect(['cfr', 'timestamps'], self::failed($rTooTight));
+		$rClean = !in_array('timestamps', array_column($rTolerant['issues'], 1), true);
+		$this->assertTrue($rClean || $rGlitchy !== [], 'glitches above the size limit must fail');
+	}
+
 	public function testAMissingFileIsAnError(): void {
 		$rResult = $this->scan(self::$rDir . '/nope.mp4', self::spec());
 
@@ -166,6 +199,8 @@ final class ChannelAuditScanTest extends TestCase {
 
 		$this->assertCount(4, $rErrors);
 		$this->assertSame('h264 1920x1080 25p yuv420p SAR 1:1 GOP 50 · aac 48k 2ch', AuditStandard::describe(AuditStandard::normalize(AuditStandard::DEFAULTS)[0]));
+		$this->assertSame('h264 1280x720 25p yuv420p SAR 1:1 GOP ≤100 · aac 48k 2ch · tolerates 10 timestamp glitch(es) ≤ 150 ms',
+			AuditStandard::describe(AuditStandard::normalize(['width' => 1280, 'height' => 720, 'gop' => 100, 'gop_mode' => 'max', 'max_glitches' => 10, 'max_glitch_ms' => 150] + AuditStandard::DEFAULTS)[0]));
 		$this->assertEqualsWithDelta(29.97, AuditStandard::rate('30000/1001'), 0.001);
 	}
 }
