@@ -129,6 +129,38 @@ final class SourceHealthCalculatorTest extends TestCase {
 		$this->assertSame(0, $rRows[0]['failures']);
 	}
 
+	/**
+	 * bandookk, 2026-11-09: 136 drops in 3 days on air, yet hours clean in VLC
+	 * and on the panel. The drops come in bursts — the panel retrying through one
+	 * outage — so they are a few incidents, and the score is about those.
+	 */
+	public function testABurstOfDropsDuringOneOutageIsOneIncident(): void {
+		$rEvents = [];
+		$t = 1000;
+		foreach ([0, 86400, 2 * 86400] as $rDay) {               // one outage a day …
+			for ($i = 0; $i < 40; $i++) {                         // … of 40 quick drops, 1 min apart
+				$rEvents[] = self::ev(1, 'STREAM_RESTART', self::A, $t + $rDay + 60 * $i);
+				$rEvents[] = self::ev(1, 'STREAM_FAILED', self::A, $t + $rDay + 60 * $i + 50);
+			}
+			$rEvents[] = self::ev(1, 'STREAM_RESTART', self::A, $t + $rDay + 2400); // then up all day
+		}
+		$rRows = self::rows($rEvents, 1000, 1000 + 3 * 86400, [1 => self::A]);
+
+		$this->assertSame(120, $rRows[0]['failures']);
+		$this->assertSame(3, $rRows[0]['incidents']);
+		$this->assertGreaterThan(75, $rRows[0]['score']);
+	}
+
+	public function testAFailedStartDoesNotHideTheNextDrop(): void {
+		$rRows = self::rows([
+			self::ev(1, 'STREAM_START_FAIL', self::A, 1000),
+			self::ev(1, 'STREAM_RESTART', self::A, 1100),
+			self::ev(1, 'STREAM_FAILED', self::A, 1300),
+		], 1000, 5000);
+
+		$this->assertSame(1, $rRows[0]['incidents']);
+	}
+
 	/** The figures from a real panel (2026-11-09): the score must rank them sensibly. */
 	public function testScoreOnRealFigures(): void {
 		$rScore = static fn (int $rStarts, int $rFails, int $rFailures, int $rUptime): ?int => SourceHealthCalculator::score([

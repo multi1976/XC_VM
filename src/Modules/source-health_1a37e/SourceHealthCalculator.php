@@ -98,6 +98,13 @@ final class SourceHealthCalculator {
 					}
 					if (isset($rStats[$rFailed])) {
 						$rStats[$rFailed]['failures']++;
+						// A failure soon after the last one (on any server) is the same
+						// outage still going on — the panel retrying a source that keeps
+						// dropping — not a new one.
+						if ($rStats[$rFailed]['last_drop'] === 0 || $rTime - $rStats[$rFailed]['last_drop'] > self::INCIDENT_GAP_SEC) {
+							$rStats[$rFailed]['incidents']++;
+						}
+						$rStats[$rFailed]['last_drop'] = $rTime;
 						$rStats[$rFailed]['last_failure'] = max($rStats[$rFailed]['last_failure'], $rTime);
 					}
 					$rOpen[$rServer] = null;
@@ -157,6 +164,8 @@ final class SourceHealthCalculator {
 		return array_values($rStats);
 	}
 
+	/** Failures closer together than this (on any server) are one incident. */
+	public const INCIDENT_GAP_SEC = 900;
 	/** Prior for the time between failures: one failure in this many hours. */
 	public const MTBF_PRIOR_HOURS = 6.0;
 	/** Time between failures at which stability reaches 1 − 1/e ≈ 0.63. */
@@ -169,8 +178,11 @@ final class SourceHealthCalculator {
 	 *   start     (starts + 1) / (attempts + 1)        one assumed success, so one
 	 *                                                  missed start is not "0%"
 	 *   stability 1 − e^(−MTBF / 6h), where            MTBF 6 h ≈ 0.63, 24 h ≈ 0.98;
-	 *             MTBF = (hours + 6) / (failures + 1)  the prior keeps a few clean
-	 *                                                  minutes from reading as bad
+	 *             MTBF = (hours + 6) / (incidents + 1) the prior keeps a few clean
+	 *                                                  minutes from reading as bad;
+	 *                                                  incidents, not raw failures: a
+	 *                                                  burst of 100 retries during one
+	 *                                                  outage is one outage
 	 *   quality   1 / (1 + issues / (hours + 1))
 	 *
 	 * Multiplied, not averaged: a source that starts every time but drops every
@@ -186,7 +198,7 @@ final class SourceHealthCalculator {
 			return [null, 'none'];
 		}
 		$rStart = ((int) $rRow['starts'] + 1) / ($rAttempts + 1);
-		$rMtbf = ($rHours + self::MTBF_PRIOR_HOURS) / ((int) $rRow['failures'] + 1);
+		$rMtbf = ($rHours + self::MTBF_PRIOR_HOURS) / ((int) ($rRow['incidents'] ?? $rRow['failures']) + 1);
 		$rStability = 1 - exp(-$rMtbf / self::STABILITY_SCALE_HOURS);
 		$rQuality = 1 / (1 + ((int) $rRow['quality_issues']) / ($rHours + 1));
 		$rScore = (int) round(100 * $rStart * $rStability * $rQuality);
@@ -221,7 +233,7 @@ final class SourceHealthCalculator {
 	private static function blank(int $rIndex, string $rSource): array {
 		return [
 			'index' => $rIndex, 'source' => $rSource,
-			'starts' => 0, 'start_fails' => 0, 'failures' => 0,
+			'starts' => 0, 'start_fails' => 0, 'failures' => 0, 'incidents' => 0, 'last_drop' => 0,
 			'quality_issues' => 0, 'switched_away' => 0,
 			'uptime_sec' => 0, 'last_active' => 0, 'last_failure' => 0,
 			'running' => false, 'score' => null, 'confidence' => 'none',

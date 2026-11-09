@@ -69,19 +69,21 @@ final class SourceHealthTab {
 		$rHtml .= '<p class="text-muted mb-2">From ' . $h(date('Y-m-d H:i', $rFrom)) . ' to now, all servers. Read-only: nothing here changes how the stream runs.</p>';
 		$rHtml .= '<div class="table-responsive"><table class="table table-sm table-hover mb-2"><thead><tr>'
 			. '<th>#</th><th>Source</th><th class="text-center">Score</th><th class="text-center">Starts / failed</th>'
-			. '<th class="text-center">Failures</th><th class="text-center">Quality issues</th><th class="text-center">On air</th>'
-			. '<th class="text-center">MTBF</th><th>Last failure</th><th>Output profile</th></tr></thead><tbody>';
+			. '<th class="text-center">Failures</th><th class="text-center" title="Failures less than ' . intdiv(SourceHealthCalculator::INCIDENT_GAP_SEC, 60) . ' minutes apart count as one incident (one outage)">Incidents</th>'
+			. '<th class="text-center">Quality issues</th><th class="text-center">On air</th>'
+			. '<th class="text-center" title="Mean time on air between incidents">MTBF</th><th>Last failure</th><th>Output profile</th></tr></thead><tbody>';
 
 		foreach ($rRows as $rRow) {
 			$rProfile = $rProfiles[md5($rRow['source'])] ?? null;
 			$rGroup = $rProfile !== null ? ($rGroups[(string) $rProfile['fingerprint']] ?? '') : '';
-			$rMtbf = $rRow['failures'] > 0 ? self::duration(intdiv((int) $rRow['uptime_sec'], (int) $rRow['failures'])) : ($rRow['uptime_sec'] > 0 ? '&gt; ' . self::duration((int) $rRow['uptime_sec']) : '–');
+			$rMtbf = $rRow['incidents'] > 0 ? self::duration(intdiv((int) $rRow['uptime_sec'], (int) $rRow['incidents'])) : ($rRow['uptime_sec'] > 0 ? '&gt; ' . self::duration((int) $rRow['uptime_sec']) : '–');
 			$rHtml .= '<tr>'
 				. '<td>' . ((int) $rRow['index'] + 1) . ($rRow['running'] ? ' <span class="badge bg-label-success" title="On air now">live</span>' : '') . '</td>'
 				. '<td><code title="' . $h(self::mask($rRow['source'])) . '">' . $h(self::mask($rRow['source'])) . '</code></td>'
 				. '<td class="text-center">' . self::scoreBadge($rRow['score'], (string) $rRow['confidence']) . '</td>'
 				. '<td class="text-center">' . (int) $rRow['starts'] . ' / ' . (int) $rRow['start_fails'] . '</td>'
 				. '<td class="text-center">' . (int) $rRow['failures'] . '</td>'
+				. '<td class="text-center">' . (int) $rRow['incidents'] . '</td>'
 				. '<td class="text-center">' . (int) $rRow['quality_issues'] . '</td>'
 				. '<td class="text-center">' . ($rRow['uptime_sec'] > 0 ? self::duration((int) $rRow['uptime_sec']) : '–') . '</td>'
 				. '<td class="text-center">' . $rMtbf . '</td>'
@@ -105,7 +107,8 @@ final class SourceHealthTab {
 			$rHtml .= '<p class="text-muted mb-1">Sources in the same profile group (same letter) can replace each other with only a timestamp jump. '
 				. 'A switch between groups makes players re-initialise their decoder, which many set-top boxes handle badly.</p>';
 		}
-		$rHtml .= '<p class="text-muted small mb-0">Score 0–100 = chance the source starts × chance it stays up (time between failures; 6 h ≈ 63, 24 h ≈ 98) × quality issues per hour. '
+		$rHtml .= '<p class="text-muted small mb-0">Score 0–100 = chance the source starts × chance it stays up (time between incidents; 6 h ≈ 63, 24 h ≈ 98) × quality issues per hour. '
+			. 'Failures less than ' . intdiv(SourceHealthCalculator::INCIDENT_GAP_SEC, 60) . ' minutes apart are one incident: a burst of retries during one outage counts once. '
 			. 'Low confidence means little data. Profiles are recorded every 5 minutes while a source is on air.</p>';
 		return $rHtml;
 	}
