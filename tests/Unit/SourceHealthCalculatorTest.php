@@ -198,6 +198,40 @@ final class SourceHealthCalculatorTest extends TestCase {
 		$this->assertSame(1, $rOut['unattributed']);
 	}
 
+	/**
+	 * 2026-11-10, real panel: the fanout remuxer writes a banner and a stream
+	 * description on every launch; those filled the top five and hid the one
+	 * line that says why ("source failed: …"). They are now launches, not errors.
+	 */
+	public function testLaunchBannersAndStreamDescriptionsAreNotErrors(): void {
+		$rLaunch = [
+			'2026/11/10 19:36:01 [remux] xc_fanout 1.4.2 native remuxer, pid 41234',
+			"2026/11/10 19:36:01 [remux] Input #0, mpegts, from 'http://b.example/live/u/p/1.ts':",
+			'  Program 1',
+			'    Stream #0:0[0x100]: Video: h264 (High), yuv420p, 1920x1080, 25 fps',
+			"Output #0, hls, to '/home/xc_vm/content/streams/561_.m3u8':",
+		];
+		$rErrors = [];
+		foreach ([1000, 3000] as $t) {
+			foreach ($rLaunch as $rLine) {
+				$rErrors[] = ['server_id' => 1, 'date' => $t + 1, 'error' => $rLine];
+			}
+		}
+		$rErrors[] = ['server_id' => 1, 'date' => 1990, 'error' => '2026/11/10 19:52:30 [remux] source failed: read tcp 10.0.0.2:51234->1.2.3.4:80: i/o timeout'];
+		$rErrors[] = ['server_id' => 1, 'date' => 2995, 'error' => '2026/11/10 20:09:10 [remux] source failed: remux: unsupported source: http://x/y a web page, not a stream'];
+		$rEvents = [
+			self::ev(1, 'STREAM_START', self::A, 1000),
+			self::ev(1, 'STREAM_FAILED', self::A, 2000),
+			self::ev(1, 'STREAM_RESTART', self::A, 3000),
+		];
+		$rOut = SourceHealthCalculator::errorsBySource([self::A], $rEvents, $rErrors);
+
+		$this->assertSame(2, $rOut['launches'][0]);
+		$this->assertSame(['source failed: read tcp (ip):#->(ip):#: i/o timeout', 'source failed: remux: unsupported source: (url) a web page, not a stream'], array_column($rOut['by_source'][0], 0));
+		$this->assertSame('info', SourceHealthCalculator::errorKind('2026/11/10 19:36:01 [remux] stopped'));
+		$this->assertSame('error', SourceHealthCalculator::errorKind('[http @ 0x55] HTTP error 403 Forbidden'));
+	}
+
 	public function testAFailedStartDoesNotHideTheNextDrop(): void {
 		$rRows = self::rows([
 			self::ev(1, 'STREAM_START_FAIL', self::A, 1000),

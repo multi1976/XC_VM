@@ -57,15 +57,18 @@ final class SourceHealthTab {
 	private static function errorSection(array $rRows, array $rErrors): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rHtml = '<h6 class="mt-4 mb-1">What the encoder reported</h6>'
-			. '<p class="text-muted small mb-2">The commonest lines from Stream Error Logs in the report window, each put with the source this server was using or starting within two minutes of it. Numbers are replaced by #, so repeats group together.</p>';
+			. '<p class="text-muted small mb-2">The commonest error lines from Stream Error Logs in the report window, each put with the source this server was using or starting at the time. '
+			. 'Launch banners and stream descriptions are left out (they are counted as launches); numbers are replaced by #, so repeats group together.</p>';
 		if ($rErrors['by_source'] === []) {
-			return $rHtml . '<p class="text-muted small mb-0">No error lines for this stream in the window' . ($rErrors['unattributed'] > 0 ? ' that could be put with a source (' . (int) $rErrors['unattributed'] . ' not placed)' : '') . '.</p>';
+			return $rHtml . '<p class="text-muted small mb-0">No error lines (beyond launch banners) for this stream in the window' . ($rErrors['unattributed'] > 0 ? ' that could be put with a source (' . (int) $rErrors['unattributed'] . ' not placed)' : '') . '.</p>';
 		}
 		$rHtml .= '<div class="table-responsive"><table class="table table-sm mb-2"><thead><tr><th>#</th><th>Message</th><th class="text-center">Times</th><th>Last</th></tr></thead><tbody>';
 		foreach ($rRows as $rRow) {
 			foreach ($rErrors['by_source'][$rRow['index']] ?? [] as $n => [$rMessage, $rCount, $rLast]) {
+				$rLaunches = (int) ($rErrors['launches'][$rRow['index']] ?? 0);
 				$rHtml .= '<tr>'
-					. ($n === 0 ? '<td rowspan="' . count($rErrors['by_source'][$rRow['index']]) . '">' . ((int) $rRow['index'] + 1) . '<br><small class="text-muted">' . $h(self::mask($rRow['source'])) . '</small></td>' : '')
+					. ($n === 0 ? '<td rowspan="' . count($rErrors['by_source'][$rRow['index']]) . '">' . ((int) $rRow['index'] + 1) . '<br><small class="text-muted">' . $h(self::mask($rRow['source']))
+						. ($rLaunches > 0 ? '<br>' . $rLaunches . ' launch(es) logged' : '') . '</small></td>' : '')
 					. '<td><code class="text-wrap">' . $h($rMessage) . '</code></td><td class="text-center">' . (int) $rCount . '</td><td><small>' . $h(date('m-d H:i', $rLast)) . '</small></td></tr>';
 			}
 		}

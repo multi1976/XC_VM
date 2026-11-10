@@ -269,7 +269,7 @@ final class SourceHealthCalculator {
 	 * @param list<string> $rSources
 	 * @param list<array{server_id:int|string, action:string, source:?string, date:int|string}> $rEvents
 	 * @param list<array{server_id:int|string, date:int|string, error:string}> $rErrors
-	 * @return array{by_source: array<int, list<array{0:string, 1:int, 2:int}>>, unattributed: int}
+	 * @return array{by_source: array<int, list<array{0:string, 1:int, 2:int}>>, launches: array<int, int>, unattributed: int}
 	 *         source index => [message, count, last time], most frequent first (top 5)
 	 */
 	public static function errorsBySource(array $rSources, array $rEvents, array $rErrors, int $rSlack = 120): array {
@@ -285,6 +285,7 @@ final class SourceHealthCalculator {
 			}
 		}
 		$rCounts = [];
+		$rLaunches = [];
 		$rUnattributed = 0;
 		foreach ($rErrors as $rError) {
 			$rLine = $rTimeline[(int) $rError['server_id']] ?? [];
@@ -309,6 +310,14 @@ final class SourceHealthCalculator {
 				$rUnattributed++;
 				continue;
 			}
+			$rKind = self::errorKind((string) $rError['error']);
+			if ($rKind === 'launch') {
+				$rLaunches[$rMatch] = ($rLaunches[$rMatch] ?? 0) + 1;
+				continue;
+			}
+			if ($rKind === 'info') {
+				continue;
+			}
 			$rMessage = self::normalizeError((string) $rError['error']);
 			$rCounts[$rMatch][$rMessage][0] = ($rCounts[$rMatch][$rMessage][0] ?? 0) + 1;
 			$rCounts[$rMatch][$rMessage][1] = max($rCounts[$rMatch][$rMessage][1] ?? 0, $t);
@@ -320,15 +329,41 @@ final class SourceHealthCalculator {
 				$rOut[$i][] = [(string) $rMessage, $rN, $rLast];
 			}
 		}
-		return ['by_source' => $rOut, 'unattributed' => $rUnattributed];
+		return ['by_source' => $rOut, 'launches' => $rLaunches, 'unattributed' => $rUnattributed];
+	}
+
+	/**
+	 * What an error-log line is. The log holds more than errors: every launch
+	 * writes a banner (the fanout remuxer's "native remuxer, pid N", ffmpeg's
+	 * version) and a description of the input and output ("Input #0, mpegts,
+	 * from …", "Program 1", "Stream #0:0: Video: h264", "Output #0, hls, to …").
+	 *
+	 * @return string launch | info | error
+	 */
+	public static function errorKind(string $rLine): string {
+		$rText = self::stripLogPrefix(str_replace(['&lt;', '&gt;'], ['<', '>'], $rLine));
+		if (preg_match('~native remuxer, pid \d+|^ffmpeg version ~i', $rText)) {
+			return 'launch';
+		}
+		$rInfo = '~^(Input|Output) #?\d+, |^Program \d+|^Stream #?\d+:\d+|^(Duration|Metadata|Stream mapping|Press \[q\]|built with|configuration|lib(av|sw|post)\w+)\b'
+			. '|^(service_name|service_provider|encoder|handler_name|title|variant_bitrate)\s*:|^starting: |^stopped$|^ingest .* connected$~i';
+		return preg_match($rInfo, $rText) ? 'info' : 'error';
+	}
+
+	/** "2026/11/10 19:36:01 [remux] text" → "text" */
+	private static function stripLogPrefix(string $rLine): string {
+		$rLine = trim($rLine);
+		$rLine = (string) preg_replace('~^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\s+~', '', $rLine);
+		return trim((string) preg_replace('~^\[(remux|panel|ffmpeg)\]\s*~i', '', $rLine));
 	}
 
 	/** One error line as a message to group by: no URLs, addresses or changing numbers. */
 	public static function normalizeError(string $rLine): string {
-		$rLine = str_replace(['&lt;', '&gt;'], ['<', '>'], $rLine);
+		$rLine = self::stripLogPrefix(str_replace(['&lt;', '&gt;'], ['<', '>'], $rLine));
 		$rLine = (string) preg_replace('~[a-z]+://\S+~i', '(url)', $rLine);
 		$rLine = (string) preg_replace('~\[[\w-]+ @ 0x[0-9a-f]+\]\s*~i', '', $rLine);
 		$rLine = (string) preg_replace('~0x[0-9a-f]+~i', '', $rLine);
+		$rLine = (string) preg_replace('~\b\d{1,3}(\.\d{1,3}){3}\b~', '(ip)', $rLine);
 		// HTTP status codes say what went wrong (404, 403, 509): keep them, mask other numbers.
 		$rLine = (string) preg_replace('~\b(returned|error|HTTP)\s+(\d{3})\b~i', '$1 §$2§', $rLine);
 		$rLine = (string) preg_replace('~(?<!§)\b\d+(\.\d+)?\b(?!§)~', '#', $rLine);
