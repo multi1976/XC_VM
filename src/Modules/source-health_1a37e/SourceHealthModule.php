@@ -23,7 +23,7 @@ class SourceHealthModule extends BaseModule {
 	}
 
 	public function getVersion(): string {
-		return '0.1.7';
+		return '0.1.8';
 	}
 
 	public function boot(ServiceContainer $container): void {

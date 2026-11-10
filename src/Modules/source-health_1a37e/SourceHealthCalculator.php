@@ -259,23 +259,41 @@ final class SourceHealthCalculator {
 	}
 
 	/**
-	 * Put the encoder's error lines (`streams_errors`: server, time, text, no
-	 * source) next to the source they belong to, on the same server:
-	 *   1. the next event within $rSlack/2 seconds — an error line comes a few
-	 *      seconds before the STREAM_FAILED or STREAM_START_FAIL it explains;
-	 *   2. else the run on air: the last event, if it started a run (however
-	 *      long ago), or any last event within $rSlack seconds.
+	 * Put the encoder's error lines (`streams_errors`) with the source they are
+	 * about. The table has no source column, and its `date` is when the errors
+	 * cron copied the line, not when it was written — every line of a cron run
+	 * shares one time — so time alone cannot place a line while the panel walks
+	 * a source list in seconds. In order:
+	 *
+	 *   1. By name: the line mentions a source's host ("lookup host.example: no
+	 *      such host", "Input #0, mpegts, from 'http://host…'"). Several sources
+	 *      on the same host are told apart by the channel id in the path.
+	 *   2. By time, for lines that name no host: the line's own time stamp
+	 *      ("2026/11/10 19:36:01 [remux] …", corrected for a time-zone offset
+	 *      against the copy time), else the copy time; then the next event on
+	 *      the same server within $rSlack/2 s (an error line comes just before
+	 *      the STREAM_FAILED or STREAM_START_FAIL it explains), else the run on
+	 *      air (the last event if it started a run, or any within $rSlack s).
+	 *
+	 * Launches are counted from the remuxer's input line ("Input #0, … from
+	 * '<url>'"), which names the source, rather than from its banner.
 	 *
 	 * @param list<string> $rSources
 	 * @param list<array{server_id:int|string, action:string, source:?string, date:int|string}> $rEvents
 	 * @param list<array{server_id:int|string, date:int|string, error:string}> $rErrors
-	 * @return array{by_source: array<int, list<array{0:string, 1:int, 2:int}>>, launches: array<int, int>, unattributed: int}
+	 * @return array{by_source: array<int, list<array{0:string, 1:int, 2:int}>>, launches: array<int, int>, unattributed: int, by_name: int, by_time: int}
 	 *         source index => [message, count, last time], most frequent first (top 5)
 	 */
 	public static function errorsBySource(array $rSources, array $rEvents, array $rErrors, int $rSlack = 120): array {
 		$rIndex = [];
+		$rHosts = [];
 		foreach (array_values($rSources) as $i => $rSource) {
-			$rIndex[trim((string) $rSource)] ??= $i;
+			$rSource = trim((string) $rSource);
+			$rIndex[$rSource] ??= $i;
+			$rHost = strtolower((string) parse_url($rSource, PHP_URL_HOST));
+			if ($rHost !== '') {
+				$rHosts[$rHost][$i] = basename((string) parse_url($rSource, PHP_URL_PATH));
+			}
 		}
 		$rTimeline = [];
 		foreach ($rEvents as $rEvent) {
@@ -284,41 +302,35 @@ final class SourceHealthCalculator {
 				$rTimeline[(int) $rEvent['server_id']][] = [(int) $rEvent['date'], $rIndex[$rSrc], in_array($rEvent['action'], self::OPEN, true)];
 			}
 		}
+
 		$rCounts = [];
 		$rLaunches = [];
-		$rUnattributed = 0;
+		$rUnattributed = $rByName = $rByTime = 0;
 		foreach ($rErrors as $rError) {
-			$rLine = $rTimeline[(int) $rError['server_id']] ?? [];
-			$t = (int) $rError['date'];
-			$rBefore = $rAfter = null;
-			foreach ($rLine as $rEvent) {
-				if ($rEvent[0] < $t) {
-					$rBefore = $rEvent;
-				} else {
-					$rAfter = $rEvent;
-					break;
-				}
+			$rText = str_replace(['&lt;', '&gt;'], ['<', '>'], (string) $rError['error']);
+			$rKind = self::errorKind($rText);
+			$t = self::lineTime($rText, (int) $rError['date']);
+
+			$rMatch = self::byName($rText, $rHosts);
+			if ($rMatch === null && preg_match('~^(Input #?\d+, )~', self::stripLogPrefix($rText))) {
+				continue; // an input line for a source not (or no longer) in the list
 			}
-			if ($rAfter !== null && $rAfter[0] - $t <= intdiv($rSlack, 2)) {
-				$rMatch = $rAfter[1];
-			} elseif ($rBefore !== null && ($rBefore[2] || $t - $rBefore[0] <= $rSlack)) {
-				$rMatch = $rBefore[1];
-			} else {
-				$rMatch = null;
+			if ($rMatch !== null) {
+				$rByName++;
+			} elseif ($rKind === 'error') {
+				$rMatch = self::byTime($rTimeline[(int) $rError['server_id']] ?? [], $t, $rSlack);
+				$rMatch === null ? $rUnattributed++ : $rByTime++;
 			}
 			if ($rMatch === null) {
-				$rUnattributed++;
 				continue;
 			}
-			$rKind = self::errorKind((string) $rError['error']);
-			if ($rKind === 'launch') {
-				$rLaunches[$rMatch] = ($rLaunches[$rMatch] ?? 0) + 1;
+			if ($rKind !== 'error') {
+				if (preg_match('~^Input #?\d+, ~', self::stripLogPrefix($rText))) {
+					$rLaunches[$rMatch] = ($rLaunches[$rMatch] ?? 0) + 1;
+				}
 				continue;
 			}
-			if ($rKind === 'info') {
-				continue;
-			}
-			$rMessage = self::normalizeError((string) $rError['error']);
+			$rMessage = self::normalizeError($rText);
 			$rCounts[$rMatch][$rMessage][0] = ($rCounts[$rMatch][$rMessage][0] ?? 0) + 1;
 			$rCounts[$rMatch][$rMessage][1] = max($rCounts[$rMatch][$rMessage][1] ?? 0, $t);
 		}
@@ -329,7 +341,73 @@ final class SourceHealthCalculator {
 				$rOut[$i][] = [(string) $rMessage, $rN, $rLast];
 			}
 		}
-		return ['by_source' => $rOut, 'launches' => $rLaunches, 'unattributed' => $rUnattributed];
+		return ['by_source' => $rOut, 'launches' => $rLaunches, 'unattributed' => $rUnattributed, 'by_name' => $rByName, 'by_time' => $rByTime];
+	}
+
+	/**
+	 * The source a line names by host, or null. Several sources on the host:
+	 * the one whose channel id (last path segment) the line also carries.
+	 *
+	 * @param array<string, array<int, string>> $rHosts host => [source index => last path segment]
+	 */
+	private static function byName(string $rText, array $rHosts): ?int {
+		$rLower = strtolower($rText);
+		foreach ($rHosts as $rHost => $rOnHost) {
+			if (!str_contains($rLower, $rHost)) {
+				continue;
+			}
+			if (count($rOnHost) === 1) {
+				return (int) array_key_first($rOnHost);
+			}
+			foreach ($rOnHost as $i => $rSegment) {
+				if ($rSegment !== '' && str_contains($rText, '/' . $rSegment)) {
+					return (int) $i;
+				}
+			}
+			return null; // same host, cannot tell which: leave it to time
+		}
+		return null;
+	}
+
+	/** @param list<array{0:int, 1:int, 2:bool}> $rLine */
+	private static function byTime(array $rLine, int $t, int $rSlack): ?int {
+		$rBefore = $rAfter = null;
+		foreach ($rLine as $rEvent) {
+			if ($rEvent[0] < $t) {
+				$rBefore = $rEvent;
+			} else {
+				$rAfter = $rEvent;
+				break;
+			}
+		}
+		if ($rAfter !== null && $rAfter[0] - $t <= intdiv($rSlack, 2)) {
+			return $rAfter[1];
+		}
+		if ($rBefore !== null && ($rBefore[2] || $t - $rBefore[0] <= $rSlack)) {
+			return $rBefore[1];
+		}
+		return null;
+	}
+
+	/**
+	 * When a line was written: its own "Y/m/d H:i:s" stamp when it has one,
+	 * else when the cron copied it. A stamp hours off the copy time is the
+	 * writer's time zone differing from PHP's: the offset (a multiple of 15
+	 * minutes) is taken out.
+	 */
+	public static function lineTime(string $rText, int $rCopied): int {
+		if (!preg_match('~^\s*(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})~', $rText, $m)) {
+			return $rCopied;
+		}
+		$rStamp = strtotime(str_replace('/', '-', $m[1]));
+		if ($rStamp === false) {
+			return $rCopied;
+		}
+		$rDiff = $rCopied - $rStamp;
+		if ($rDiff < -120 || $rDiff > 1800) {
+			$rStamp += (int) (round($rDiff / 900) * 900);
+		}
+		return $rStamp;
 	}
 
 	/**

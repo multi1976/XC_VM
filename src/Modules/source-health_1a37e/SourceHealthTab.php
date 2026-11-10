@@ -57,8 +57,11 @@ final class SourceHealthTab {
 	private static function errorSection(array $rRows, array $rErrors): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rHtml = '<h6 class="mt-4 mb-1">What the encoder reported</h6>'
-			. '<p class="text-muted small mb-2">The commonest error lines from Stream Error Logs in the report window, each put with the source this server was using or starting at the time. '
-			. 'Launch banners and stream descriptions are left out (they are counted as launches); numbers are replaced by #, so repeats group together.</p>';
+			. '<p class="text-muted small mb-2">The commonest error lines from Stream Error Logs in the report window. A line that names a source\'s host goes with that source; '
+			. 'one that names none goes with the source in use or being started when it was written. Launch banners and stream descriptions are left out (launches are counted from them); '
+			. 'numbers are replaced by #, so repeats group together.'
+			. (($rErrors['by_name'] ?? 0) + ($rErrors['by_time'] ?? 0) > 0 ? ' Placed by host: ' . (int) $rErrors['by_name'] . ' · by time: ' . (int) $rErrors['by_time'] . '.' : '')
+			. '</p>';
 		if ($rErrors['by_source'] === []) {
 			return $rHtml . '<p class="text-muted small mb-0">No error lines (beyond launch banners) for this stream in the window' . ($rErrors['unattributed'] > 0 ? ' that could be put with a source (' . (int) $rErrors['unattributed'] . ' not placed)' : '') . '.</p>';
 		}

@@ -206,7 +206,7 @@ final class SourceHealthCalculatorTest extends TestCase {
 	public function testLaunchBannersAndStreamDescriptionsAreNotErrors(): void {
 		$rLaunch = [
 			'2026/11/10 19:36:01 [remux] xc_fanout 1.4.2 native remuxer, pid 41234',
-			"2026/11/10 19:36:01 [remux] Input #0, mpegts, from 'http://b.example/live/u/p/1.ts':",
+			"2026/11/10 19:36:01 [remux] Input #0, mpegts, from 'http://a.example:8080/live/u/p/1.ts':",
 			'  Program 1',
 			'    Stream #0:0[0x100]: Video: h264 (High), yuv420p, 1920x1080, 25 fps',
 			"Output #0, hls, to '/home/xc_vm/content/streams/561_.m3u8':",
@@ -217,8 +217,8 @@ final class SourceHealthCalculatorTest extends TestCase {
 				$rErrors[] = ['server_id' => 1, 'date' => $t + 1, 'error' => $rLine];
 			}
 		}
-		$rErrors[] = ['server_id' => 1, 'date' => 1990, 'error' => '2026/11/10 19:52:30 [remux] source failed: read tcp 10.0.0.2:51234->1.2.3.4:80: i/o timeout'];
-		$rErrors[] = ['server_id' => 1, 'date' => 2995, 'error' => '2026/11/10 20:09:10 [remux] source failed: remux: unsupported source: http://x/y a web page, not a stream'];
+		$rErrors[] = ['server_id' => 1, 'date' => 1990, 'error' => '[remux] source failed: read tcp 10.0.0.2:51234->1.2.3.4:80: i/o timeout'];
+		$rErrors[] = ['server_id' => 1, 'date' => 2995, 'error' => '[remux] source failed: remux: unsupported source: http://x/y a web page, not a stream'];
 		$rEvents = [
 			self::ev(1, 'STREAM_START', self::A, 1000),
 			self::ev(1, 'STREAM_FAILED', self::A, 2000),
@@ -230,6 +230,46 @@ final class SourceHealthCalculatorTest extends TestCase {
 		$this->assertSame(['source failed: read tcp (ip):#->(ip):#: i/o timeout', 'source failed: remux: unsupported source: (url) a web page, not a stream'], array_column($rOut['by_source'][0], 0));
 		$this->assertSame('info', SourceHealthCalculator::errorKind('2026/11/10 19:36:01 [remux] stopped'));
 		$this->assertSame('error', SourceHealthCalculator::errorKind('[http @ 0x55] HTTP error 403 Forbidden'));
+	}
+
+	/**
+	 * 2026-11-10, real panel: "lookup newday22.ddns.net: no such host" showed
+	 * under all four sources. streams_errors dates a line when the cron copied
+	 * it (every line of a run shares one time) and the panel walks the list in
+	 * seconds, so time cannot place it. The line names its host: that decides.
+	 */
+	public function testALineThatNamesAHostGoesToThatSourceOnly(): void {
+		$rSources = ['http://lalelalja.com:80/u/p/ts', 'http://webstar-ks.ch:8080/u/p/1138', 'http://newday22.ddns.net:2095/u/p/69504', 'http://aflaxtv.xyz:8080/u/p/1306'];
+		$rEvents = [];
+		foreach ($rSources as $i => $rSource) {                     // one walk, a second per source
+			$rEvents[] = self::ev(1, 'STREAM_START_FAIL', $rSource, 5000 + $i);
+		}
+		$rCopied = 5040;                                            // the cron ran once for all of them
+		$rErrors = [
+			['server_id' => 1, 'date' => $rCopied, 'error' => '2026/11/10 19:00:00 [remux] source failed: remux: unsupported source: http 404'],
+			['server_id' => 1, 'date' => $rCopied, 'error' => '2026/11/10 19:00:01 [remux] source failed: Get "http://webstar-ks.ch:8080/u/p/1138": EOF'],
+			['server_id' => 1, 'date' => $rCopied, 'error' => '2026/11/10 19:00:02 [remux] source failed: Get "http://newday22.ddns.net:2095/u/p/69504": dial tcp: lookup newday22.ddns.net on 127.0.0.53:53: no such host'],
+			['server_id' => 1, 'date' => $rCopied, 'error' => "2026/11/10 19:00:03 [remux] Input #0, mpegts, from 'http://aflaxtv.xyz:8080/u/p/1306':"],
+		];
+		$rOut = SourceHealthCalculator::errorsBySource($rSources, $rEvents, $rErrors);
+
+		$this->assertStringContainsString('no such host', $rOut['by_source'][2][0][0]);
+		$this->assertCount(1, $rOut['by_source'][2]);
+		$this->assertStringContainsString('EOF', $rOut['by_source'][1][0][0]);
+		$this->assertSame([3 => 1], $rOut['launches']);
+		$this->assertSame(3, $rOut['by_name']);
+		foreach ([1, 3] as $i) {
+			foreach ($rOut['by_source'][$i] ?? [] as [$rMessage]) {
+				$this->assertStringNotContainsString('newday22', $rMessage);
+			}
+		}
+	}
+
+	public function testALineTimeStampIsUsedAndATimeZoneOffsetTakenOut(): void {
+		$rStamp = strtotime('2026-11-10 19:00:00');
+		$this->assertSame($rStamp, SourceHealthCalculator::lineTime('2026/11/10 19:00:00 [remux] x', $rStamp + 50));
+		$this->assertSame($rStamp + 3600, SourceHealthCalculator::lineTime('2026/11/10 19:00:00 [remux] x', $rStamp + 3650)); // writer one hour behind
+		$this->assertSame(777, SourceHealthCalculator::lineTime('  Program 1', 777));
 	}
 
 	public function testAFailedStartDoesNotHideTheNextDrop(): void {
