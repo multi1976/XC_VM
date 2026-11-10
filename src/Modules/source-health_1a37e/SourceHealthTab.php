@@ -36,7 +36,7 @@ final class SourceHealthTab {
 			$rRecent = array_column(SourceHealthCalculator::compute($rSources, $rEvents, $rDayFrom, $rNow, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rDayFrom)), null, 'index');
 			$rProbing = SourceHealthRepository::probeEnabled($rStreamID);
 			$rAccounts = SourceHealthRepository::accountConnections();
-			$rErrors = SourceHealthCalculator::errorsBySource($rSources, $rEvents, SourceHealthRepository::errors($rStreamID, $rFrom));
+			$rErrors = SourceHealthCalculator::errorsBySource($rSources, $rEvents, SourceHealthRepository::errors($rStreamID, $rFrom), 120, SourceHealthRepository::hosts($rStreamID, 0));
 			$rProfiles = SourceHealthRepository::profiles($rStreamID);
 		} catch (\Throwable $e) {
 			error_log('source-health: ' . $e->getMessage());
@@ -44,7 +44,52 @@ final class SourceHealthTab {
 		}
 
 		$rOpen = $rFullPage ? '' : '<p class="mb-2"><a href="./source_health?id=' . (int) $rStream['id'] . '" target="_blank" rel="noopener">Open this report as a full page ↗</a></p>';
-		return $rOpen . self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow, $rAccounts) . self::timeline($rRows, $rFrom, $rNow) . self::errorSection($rRows, $rErrors);
+		return $rOpen . self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow, $rAccounts) . self::timeline($rRows, $rFrom, $rNow) . self::runSection($rRows) . self::errorSection($rRows, $rErrors);
+	}
+
+	/**
+	 * How long a source stays on air before it drops, from runs seen whole
+	 * (started and failed inside the window). Lengths that cluster tightly
+	 * around one value point at a timer — a provider session or token that
+	 * expires — rather than a bad line, and a timer can be beaten by
+	 * reconnecting before it runs out.
+	 *
+	 * @param list<array<string, mixed>> $rRows
+	 */
+	private static function runSection(array $rRows): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rBody = '';
+		$rLabels = array_values(SourceHealthCalculator::RUN_BUCKETS);
+		foreach ($rRows as $rRow) {
+			$rStats = SourceHealthCalculator::runLengths($rRow['run_lengths'] ?? []);
+			if ($rStats === null) {
+				continue;
+			}
+			$rPeak = max($rStats['buckets']) ?: 1;
+			$rBody .= '<tr><td class="text-start">' . ((int) $rRow['index'] + 1) . ' <small class="text-muted">' . $h(self::mask($rRow['source'])) . '</small></td>'
+				. '<td class="text-center">' . (int) $rStats['count'] . '</td>'
+				. '<td class="text-center"><strong>' . $h(self::duration($rStats['median'])) . '</strong></td>'
+				. '<td class="text-center"><small>' . $h(self::duration($rStats['p25']) . ' – ' . self::duration($rStats['p75'])) . '</small></td>'
+				. '<td class="text-center"><small>' . $h(self::duration($rStats['min']) . ' / ' . self::duration($rStats['max'])) . '</small></td>';
+			foreach ($rLabels as $rLabel) {
+				$n = (int) $rStats['buckets'][$rLabel];
+				$rBody .= '<td class="text-center' . ($n > 0 ? ($n === $rPeak ? ' bg-label-primary' : ' bg-label-secondary') : ' text-muted') . '">' . ($n > 0 ? $n : '·') . '</td>';
+			}
+			$rBody .= '<td>' . ($rStats['steady']
+				? '<span class="badge bg-label-warning" title="Half of the runs end within a narrow band around the same length: typical of a provider session or token that expires, not of a bad line.">steady ~' . $h(self::duration($rStats['median'])) . ' — likely a session/token limit</span>'
+				: '<small class="text-muted">' . ($rStats['count'] < 5 ? 'too few runs to tell' : ($rStats['median'] < 2 * SourceHealthCalculator::INCIDENT_GAP_SEC ? 'short runs: drops in bad spells' : 'spread out')) . '</small>') . '</td></tr>';
+		}
+		$rHtml = '<h6 class="mt-4 mb-1">How long runs last before they drop</h6>'
+			. '<p class="text-muted small mb-2">Every run that started and failed inside the window, per source. Runs that end at about the same length again and again point to a timer on the provider\'s side '
+			. '(a session or token that expires) rather than to a bad line; that is worth knowing before switching away from an otherwise good source.</p>';
+		if ($rBody === '') {
+			return $rHtml . '<p class="text-muted small mb-0">No complete runs that ended in a failure in the window.</p>';
+		}
+		$rHead = '<tr><th class="text-start">#</th><th>Runs</th><th>Median</th><th>Middle half</th><th>Shortest / longest</th>';
+		foreach ($rLabels as $rLabel) {
+			$rHead .= '<th><small>' . $h($rLabel) . '</small></th>';
+		}
+		return $rHtml . '<div class="table-responsive"><table class="table table-sm table-bordered text-center mb-2"><thead>' . $rHead . '<th>Pattern</th></tr></thead><tbody>' . $rBody . '</tbody></table></div>';
 	}
 
 	/**

@@ -130,7 +130,7 @@ final class SourceHealthRepository {
 	public static function deleteForStreams(array $rStreamIDs): void {
 		$rIDs = array_values(array_unique(array_filter(array_map('intval', $rStreamIDs), static fn (int $id): bool => $id > 0)));
 		foreach (array_chunk($rIDs, 500) as $rChunk) {
-			foreach (['source_health_profiles', 'source_health_probes', 'source_health_probe_streams'] as $rTable) {
+			foreach (['source_health_profiles', 'source_health_probes', 'source_health_probe_streams', 'source_health_hosts'] as $rTable) {
 				self::db()->query('DELETE FROM `' . $rTable . '` WHERE `stream_id` IN (' . implode(',', $rChunk) . ')');
 			}
 		}
@@ -318,7 +318,27 @@ final class SourceHealthRepository {
 		return $rStats;
 	}
 
+	/** @param list<string> $rHosts redirect targets a probe of this source saw */
+	public static function saveHosts(int $rStreamID, string $rSource, array $rHosts, int $rNow): void {
+		foreach (array_slice($rHosts, 0, 5) as $rHost) {
+			self::db()->query(
+				'INSERT INTO `source_health_hosts` (`stream_id`, `source_hash`, `host`, `last_seen`) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE `last_seen` = VALUES(`last_seen`)',
+				$rStreamID, md5($rSource), mb_substr(strtolower($rHost), 0, 190), $rNow
+			);
+		}
+	}
+
+	/** @return array<string, list<string>> md5(source) => hosts it redirected to (seen in the report window) */
+	public static function hosts(int $rStreamID, int $rFrom): array {
+		$rOut = [];
+		foreach (self::db()->fetchAll('SELECT `source_hash`, `host` FROM `source_health_hosts` WHERE `stream_id` = ? AND `last_seen` >= ? ORDER BY `last_seen` DESC', $rStreamID, $rFrom) ?: [] as $rRow) {
+			$rOut[(string) $rRow['source_hash']][] = self::raw((string) $rRow['host']);
+		}
+		return $rOut;
+	}
+
 	public static function pruneProbes(int $rNow): void {
 		self::db()->query('DELETE FROM `source_health_probes` WHERE `checked_at` < ?', $rNow - self::PROBE_TTL_SEC);
+		self::db()->query('DELETE FROM `source_health_hosts` WHERE `last_seen` < ?', $rNow - self::PROBE_TTL_SEC);
 	}
 }

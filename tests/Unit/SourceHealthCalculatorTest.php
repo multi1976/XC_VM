@@ -266,6 +266,50 @@ final class SourceHealthCalculatorTest extends TestCase {
 		}
 	}
 
+	public function testAnErrorNamingARedirectHostGoesToTheSourceThatRedirectsThere(): void {
+		$rSources = ['http://prov.example:8080/u/p/1306', 'http://other.example/u/p/7', 'http://third.example/u/p/9'];
+		$rEvents = [self::ev(1, 'STREAM_START', $rSources[1], 5000)];   // source 2 on air: time alone would blame it
+		$rErrors = [
+			['server_id' => 1, 'date' => 5010, 'error' => '2026/11/10 19:00:00 [remux] source failed: Get "http://192.142.25.110/auth/tok123": a web page'],
+			['server_id' => 1, 'date' => 5010, 'error' => '2026/11/10 19:00:05 [remux] source failed: Get "http://lb.shared.example/x": EOF'],
+		];
+		$rRedirects = [
+			md5($rSources[0]) => ['192.142.25.110', 'lb.shared.example'],
+			md5($rSources[2]) => ['lb.shared.example', 'other.example'],   // shared, and another source's own host: both ignored
+		];
+		$rOut = SourceHealthCalculator::errorsBySource($rSources, $rEvents, $rErrors, 120, $rRedirects);
+
+		$this->assertStringContainsString('a web page', $rOut['by_source'][0][0][0]);
+		$this->assertTrue($rOut['by_source'][0][0][3]);                   // by host
+		$this->assertSame(1, $rOut['by_name']);
+		$this->assertStringContainsString('EOF', $rOut['by_source'][1][0][0]); // the shared host fell back to time
+		$this->assertSame(1, $rOut['by_time']);
+		$this->assertArrayNotHasKey(2, $rOut['by_source']);
+	}
+
+	public function testRunLengthsAreTakenFromWholeRunsAndASteadyLengthIsFlagged(): void {
+		$rEvents = [self::ev(1, 'STREAM_START', self::A, 500)];          // opened before the window: not seen whole
+		$t = 1100;
+		$rEvents[] = self::ev(1, 'STREAM_FAILED', self::A, $t);
+		foreach ([7400, 7450, 7380, 7420, 7500, 7410] as $rLength) {      // ~2h03m every time
+			$rEvents[] = self::ev(1, 'STREAM_START', self::A, $t += 10);
+			$rEvents[] = self::ev(1, 'STREAM_FAILED', self::A, $t += $rLength);
+		}
+		$rRow = self::rows($rEvents, 1000, $t + 100)[0];
+		$this->assertSame([7400, 7450, 7380, 7420, 7500, 7410], $rRow['run_lengths']);
+
+		$rStats = SourceHealthCalculator::runLengths($rRow['run_lengths']);
+		$this->assertSame([6, 7380, 7500], [$rStats['count'], $rStats['min'], $rStats['max']]);
+		$this->assertSame(6, $rStats['buckets']['2–4h']);
+		$this->assertTrue($rStats['steady']);
+
+		$rSpread = SourceHealthCalculator::runLengths([120, 900, 3000, 6000, 20000]);
+		$this->assertFalse($rSpread['steady']);
+		$this->assertSame(1, $rSpread['buckets']['>4h']);
+		$this->assertFalse(SourceHealthCalculator::runLengths([7400, 7400])['steady']);  // too few to tell
+		$this->assertNull(SourceHealthCalculator::runLengths([]));
+	}
+
 	public function testALineTimeStampIsUsedAndATimeZoneOffsetTakenOut(): void {
 		$rStamp = strtotime('2026-11-10 19:00:00');
 		$this->assertSame($rStamp, SourceHealthCalculator::lineTime('2026/11/10 19:00:00 [remux] x', $rStamp + 50));

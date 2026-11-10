@@ -3,7 +3,7 @@
     "title": "Source Health",
     "hash_id": "1a37e1b96f3f4f9531fbc665ce09fc2f",
     "description": "Per-source health report for live streams: start success, failures, time on air, quality issues, output profile and a suggested source order. Read-only.",
-    "version": "0.1.9",
+    "version": "0.2.0",
     "requires_core": "",
     "environment": "main",
     "priority": 0,

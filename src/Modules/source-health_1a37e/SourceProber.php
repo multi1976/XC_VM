@@ -119,6 +119,7 @@ final class SourceProber {
 			}
 			$rResult = self::probe($rItem['source'], SourceHealthRepository::fetchOptions($rItem['stream_id']), $rProbe, $rFfmpeg);
 			SourceHealthRepository::saveProbe($rItem['stream_id'], $rItem['source'], $rResult, time());
+			SourceHealthRepository::saveHosts($rItem['stream_id'], $rItem['source'], $rResult['redirect_hosts'] ?? [], time());
 			$rDone++;
 		}
 		SourceHealthRepository::pruneProbes($rNow);
@@ -129,9 +130,87 @@ final class SourceProber {
 	 * Probe one source.
 	 *
 	 * @param array{user_agent?:string, http_proxy?:string, cookies?:string, headers?:string} $rFetch
-	 * @return array{ok: bool, open_ms: ?int, speed: ?float, label: string, error: string}
+	 * @return array{ok: bool, open_ms: ?int, speed: ?float, label: string, error: string, redirect_hosts?: list<string>}
 	 */
 	public static function probe(string $rUrl, array $rFetch, string $rProbe, string $rFfmpeg): array {
+		$rResult = self::probeStream($rUrl, $rFetch, $rProbe, $rFfmpeg);
+		if (preg_match('~^https?://~i', $rUrl)) {
+			$rResult['redirect_hosts'] = self::redirectHosts($rUrl, $rFetch);
+		}
+		return $rResult;
+	}
+
+	/**
+	 * The hosts a source redirects to. IPTV origins commonly answer the stream
+	 * URL with 302 to a balancer or an /auth/<token> server, and that host is
+	 * the one the encoder's errors then name; knowing it lets those errors be
+	 * put with the right source. Headers only: the body is cut at its first byte.
+	 *
+	 * @param array{user_agent?:string, http_proxy?:string, cookies?:string, headers?:string} $rFetch
+	 * @return list<string>
+	 */
+	public static function redirectHosts(string $rUrl, array $rFetch, int $rMaxHops = 3): array {
+		$rHosts = [];
+		$rOrigin = strtolower((string) parse_url($rUrl, PHP_URL_HOST));
+		for ($i = 0; $i < $rMaxHops && function_exists('curl_init'); $i++) {
+			$rLocation = null;
+			$ch = curl_init($rUrl);
+			curl_setopt_array($ch, [
+				CURLOPT_FOLLOWLOCATION => false,
+				CURLOPT_CONNECTTIMEOUT => 5,
+				CURLOPT_TIMEOUT        => 8,
+				CURLOPT_USERAGENT      => (string) ($rFetch['user_agent'] ?? 'Mozilla/5.0'),
+				CURLOPT_HEADERFUNCTION => static function ($ch, string $rLine) use (&$rLocation): int {
+					if (stripos($rLine, 'Location:') === 0) {
+						$rLocation = trim(substr($rLine, 9));
+					}
+					return strlen($rLine);
+				},
+				CURLOPT_WRITEFUNCTION  => static fn ($ch, string $rData): int => 0, // stop at the body
+			]);
+			if (!empty($rFetch['http_proxy'])) {
+				curl_setopt($ch, CURLOPT_PROXY, (string) $rFetch['http_proxy']);
+			}
+			if (!empty($rFetch['cookies'])) {
+				curl_setopt($ch, CURLOPT_COOKIE, (string) $rFetch['cookies']);
+			}
+			curl_exec($ch);
+			$rCode = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+			curl_close($ch);
+			if ($rLocation === null || $rCode < 300 || $rCode >= 400) {
+				break;
+			}
+			$rNext = self::resolve($rUrl, $rLocation);
+			$rHost = strtolower((string) parse_url($rNext, PHP_URL_HOST));
+			if ($rHost === '' || in_array($rHost, $rHosts, true)) {
+				break;
+			}
+			if ($rHost !== $rOrigin) {
+				$rHosts[] = $rHost;
+			}
+			$rUrl = $rNext;
+		}
+		return $rHosts;
+	}
+
+	/** A Location header made absolute against the URL that sent it. */
+	private static function resolve(string $rBase, string $rLocation): string {
+		if (preg_match('~^[a-z][a-z0-9+.-]*://~i', $rLocation)) {
+			return $rLocation;
+		}
+		$rParts = parse_url($rBase);
+		$rRoot = ($rParts['scheme'] ?? 'http') . '://' . ($rParts['host'] ?? '') . (isset($rParts['port']) ? ':' . $rParts['port'] : '');
+		if (str_starts_with($rLocation, '//')) {
+			return ($rParts['scheme'] ?? 'http') . ':' . $rLocation;
+		}
+		if (str_starts_with($rLocation, '/')) {
+			return $rRoot . $rLocation;
+		}
+		return $rRoot . rtrim(dirname((string) ($rParts['path'] ?? '/')), '/') . '/' . $rLocation;
+	}
+
+	/** @return array{ok: bool, open_ms: ?int, speed: ?float, label: string, error: string} */
+	private static function probeStream(string $rUrl, array $rFetch, string $rProbe, string $rFfmpeg): array {
 		$rNet = ['-rw_timeout', '10000000'];
 		if (preg_match('~^https?://~i', $rUrl)) {
 			foreach (['user_agent', 'http_proxy', 'cookies', 'headers'] as $rKey) {

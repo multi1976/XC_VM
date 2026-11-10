@@ -109,6 +109,27 @@ final class SourceHealthProbeTest extends TestCase {
 		$this->assertStringNotContainsString('/live/u/p/', $rDead['error']); // the account stays out of the stored error
 	}
 
+	public function testRedirectHostsAreFollowedWithoutReadingTheStream(): void {
+		$rDir = sys_get_temp_dir() . '/sh-redir-' . getmypid();
+		@mkdir($rDir);
+		$rPort = 19000 + getmypid() % 1000;
+		file_put_contents($rDir . '/router.php', '<?php if (str_starts_with($_SERVER["REQUEST_URI"], "/live/")) { header("Location: http://127.0.0.1:' . $rPort . '/auth/tok?x=1", true, 302); return true; }'
+			. ' if (str_starts_with($_SERVER["REQUEST_URI"], "/auth/")) { header("Content-Type: video/mp2t"); echo str_repeat("G", 4096); return true; } http_response_code(404); return true;');
+		$rServer = proc_open(['php', '-S', '127.0.0.1:' . $rPort, $rDir . '/router.php'], [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $rPipes);
+		usleep(400000);
+		try {
+			$rVia = SourceProber::redirectHosts('http://localhost:' . $rPort . '/live/u/p/9.ts', ['user_agent' => 'XC_VM-test']);
+			$rDirect = SourceProber::redirectHosts('http://127.0.0.1:' . $rPort . '/auth/tok', []);
+		} finally {
+			proc_terminate($rServer);
+			proc_close($rServer);
+			@unlink($rDir . '/router.php');
+			@rmdir($rDir);
+		}
+		$this->assertSame(['127.0.0.1'], $rVia);
+		$this->assertSame([], $rDirect);
+	}
+
 	public function testProbesAreStoredAggregatedAndSwitchedPerStream(): void {
 		$rDb = new TestDb();
 		foreach (['streams', 'streams_servers'] as $rTable) {
@@ -154,7 +175,13 @@ final class SourceHealthProbeTest extends TestCase {
 			$this->assertSame(['a', 'b'], array_column(SourceHealthRepository::errors(5, 200), 'error'));
 			$this->assertSame(['b'], array_column(SourceHealthRepository::errors(5, 200, 1), 'error'));
 
+			SourceHealthRepository::saveHosts(5, 'http://b/2.ts', ['192.142.25.110', 'LB.Example'], 3000);
+			SourceHealthRepository::saveHosts(5, 'http://b/2.ts', ['192.142.25.110'], 3100);
+			$this->assertSame([md5('http://b/2.ts') => ['192.142.25.110', 'lb.example']], SourceHealthRepository::hosts(5, 0));
+			$this->assertSame([md5('http://b/2.ts') => ['192.142.25.110']], SourceHealthRepository::hosts(5, 3050));
+
 			SourceHealthRepository::deleteForStreams([5]);
+			$this->assertSame([], SourceHealthRepository::hosts(5, 0));
 			$this->assertSame([], SourceHealthRepository::probeStreams());
 			$this->assertSame([], SourceHealthRepository::probeStats(5, 0));
 		} finally {

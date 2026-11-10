@@ -98,6 +98,11 @@ final class SourceHealthCalculator {
 					$rFailed = $rSrc !== '' ? $rSrc : ($rRun['src'] ?? '');
 					if ($rRun !== null) {
 						self::close($rStats, $rRun, $rTime, $rFrom, false);
+						// How long a run lasted before it dropped — only runs seen whole
+						// (started inside the window), so a cut-off one does not read short.
+						if ($rRun['src'] === $rFailed && $rRun['since'] >= $rFrom && isset($rStats[$rFailed])) {
+							$rStats[$rFailed]['run_lengths'][] = $rTime - $rRun['since'];
+						}
 					}
 					if (isset($rStats[$rFailed])) {
 						$rStats[$rFailed]['failures']++;
@@ -258,6 +263,42 @@ final class SourceHealthCalculator {
 		return array_map(static fn (array $r): int => (int) $r['index'], $rRows);
 	}
 
+	/** Buckets for run lengths: upper bound in seconds => label. */
+	public const RUN_BUCKETS = [60 => '<1m', 300 => '1–5m', 1800 => '5–30m', 3600 => '30m–1h', 7200 => '1–2h', 14400 => '2–4h', PHP_INT_MAX => '>4h'];
+
+	/**
+	 * How long runs last before they drop. Runs that end at nearly the same
+	 * length every time are not chance failures: a provider ending sessions on a
+	 * timer (an auth token that expires, a per-session cap) looks like this,
+	 * and the cure is a quick reconnect to the same source, not a switch.
+	 *
+	 * @param list<int> $rLengths seconds
+	 * @return array{count:int, min:int, median:int, max:int, p25:int, p75:int, buckets:array<string,int>, steady:bool}|null
+	 */
+	public static function runLengths(array $rLengths): ?array {
+		if ($rLengths === []) {
+			return null;
+		}
+		sort($rLengths);
+		$n = count($rLengths);
+		$rAt = static fn (float $q): int => $rLengths[(int) min($n - 1, max(0, round($q * ($n - 1))))];
+		$rBuckets = array_fill_keys(array_values(self::RUN_BUCKETS), 0);
+		foreach ($rLengths as $rLength) {
+			foreach (self::RUN_BUCKETS as $rUpper => $rLabel) {
+				if ($rLength < $rUpper) {
+					$rBuckets[$rLabel]++;
+					break;
+				}
+			}
+		}
+		$rMedian = $rAt(0.5);
+		// Steady: at least 5 runs, the middle half within ±10% of the median, and
+		// at least 30 min long. Shorter runs that repeat are a source dropping
+		// over and over through one bad spell (an incident), not a timer.
+		$rSteady = $n >= 5 && $rMedian >= 2 * self::INCIDENT_GAP_SEC && ($rAt(0.75) - $rAt(0.25)) <= 0.2 * $rMedian;
+		return ['count' => $n, 'min' => $rLengths[0], 'median' => $rMedian, 'max' => $rLengths[$n - 1], 'p25' => $rAt(0.25), 'p75' => $rAt(0.75), 'buckets' => $rBuckets, 'steady' => $rSteady];
+	}
+
 	/**
 	 * Put the encoder's error lines (`streams_errors`) with the source they are
 	 * about. The table has no source column, and its `date` is when the errors
@@ -281,10 +322,12 @@ final class SourceHealthCalculator {
 	 * @param list<string> $rSources
 	 * @param list<array{server_id:int|string, action:string, source:?string, date:int|string}> $rEvents
 	 * @param list<array{server_id:int|string, date:int|string, error:string}> $rErrors
+	 * @param array<string, list<string>> $rRedirects md5(source) => hosts a probe saw it redirect to;
+	 *        a host two sources share, or that is another source's own host, is ambiguous and ignored
 	 * @return array{by_source: array<int, list<array{0:string, 1:int, 2:int, 3:bool}>>, launches: array<int, int>, unattributed: int, by_name: int, by_time: int}
 	 *         source index => [message, count, last time, every one placed by host], most frequent first (top 5)
 	 */
-	public static function errorsBySource(array $rSources, array $rEvents, array $rErrors, int $rSlack = 120): array {
+	public static function errorsBySource(array $rSources, array $rEvents, array $rErrors, int $rSlack = 120, array $rRedirects = []): array {
 		$rIndex = [];
 		$rHosts = [];
 		foreach (array_values($rSources) as $i => $rSource) {
@@ -293,6 +336,20 @@ final class SourceHealthCalculator {
 			$rHost = strtolower((string) parse_url($rSource, PHP_URL_HOST));
 			if ($rHost !== '') {
 				$rHosts[$rHost][$i] = basename((string) parse_url($rSource, PHP_URL_PATH));
+			}
+		}
+		$rVia = [];
+		foreach (array_values($rSources) as $i => $rSource) {
+			foreach ($rRedirects[md5(trim((string) $rSource))] ?? [] as $rHost) {
+				$rHost = strtolower(trim((string) $rHost));
+				if ($rHost !== '' && !isset($rHosts[$rHost])) {
+					$rVia[$rHost][$i] = '';
+				}
+			}
+		}
+		foreach ($rVia as $rHost => $rOnHost) {
+			if (count($rOnHost) === 1) {
+				$rHosts[$rHost] = $rOnHost; // a token URL carries no channel id: only an unshared host can name a source
 			}
 		}
 		$rTimeline = [];
@@ -456,7 +513,7 @@ final class SourceHealthCalculator {
 	private static function blank(int $rIndex, string $rSource): array {
 		return [
 			'index' => $rIndex, 'source' => $rSource,
-			'starts' => 0, 'start_fails' => 0, 'failures' => 0, 'incidents' => 0, 'incident_times' => [], 'start_fail_times' => [], 'last_drop' => 0,
+			'starts' => 0, 'start_fails' => 0, 'failures' => 0, 'incidents' => 0, 'incident_times' => [], 'start_fail_times' => [], 'run_lengths' => [], 'last_drop' => 0,
 			'quality_issues' => 0, 'switched_away' => 0,
 			'uptime_sec' => 0, 'last_active' => 0, 'last_failure' => 0,
 			'running' => false, 'score' => null, 'confidence' => 'none',
