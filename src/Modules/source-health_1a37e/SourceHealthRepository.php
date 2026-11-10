@@ -218,6 +218,24 @@ final class SourceHealthRepository {
 		return $rLast;
 	}
 
+	/**
+	 * Live connections per provider account right now: every encoder on air
+	 * on any server counts (one channel on two servers is two connections).
+	 *
+	 * @return array<string, int> SourceProber::accountKey() => connections
+	 */
+	public static function accountConnections(): array {
+		$rCounts = [];
+		$rSources = self::db()->fetchColumn('SELECT `current_source` FROM `streams_servers` WHERE `pid` > 0 AND `stream_status` = 0 AND `current_source` IS NOT NULL AND `current_source` <> \'\'') ?: [];
+		foreach ($rSources as $rSource) {
+			$rKey = SourceProber::accountKey(trim((string) $rSource));
+			if ($rKey !== null) {
+				$rCounts[$rKey] = ($rCounts[$rKey] ?? 0) + 1;
+			}
+		}
+		return $rCounts;
+	}
+
 	/** @return list<string> every source on air on the panel right now (all streams, all servers) */
 	public static function onAirSources(): array {
 		return array_values(array_unique(array_map('trim', self::db()->fetchColumn(

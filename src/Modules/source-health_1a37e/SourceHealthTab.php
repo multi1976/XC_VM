@@ -35,6 +35,7 @@ final class SourceHealthTab {
 			// The same log read over the last day only: what the source is like now.
 			$rRecent = array_column(SourceHealthCalculator::compute($rSources, $rEvents, $rDayFrom, $rNow, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rDayFrom)), null, 'index');
 			$rProbing = SourceHealthRepository::probeEnabled($rStreamID);
+			$rAccounts = SourceHealthRepository::accountConnections();
 			$rErrors = SourceHealthCalculator::errorsBySource($rSources, $rEvents, SourceHealthRepository::errors($rStreamID, $rFrom));
 			$rProfiles = SourceHealthRepository::profiles($rStreamID);
 		} catch (\Throwable $e) {
@@ -43,7 +44,7 @@ final class SourceHealthTab {
 		}
 
 		$rOpen = $rFullPage ? '' : '<p class="mb-2"><a href="./source_health?id=' . (int) $rStream['id'] . '" target="_blank" rel="noopener">Open this report as a full page ↗</a></p>';
-		return $rOpen . self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow) . self::timeline($rRows, $rFrom, $rNow) . self::errorSection($rRows, $rErrors);
+		return $rOpen . self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow, $rAccounts) . self::timeline($rRows, $rFrom, $rNow) . self::errorSection($rRows, $rErrors);
 	}
 
 	/**
@@ -67,12 +68,12 @@ final class SourceHealthTab {
 		}
 		$rHtml .= '<div class="table-responsive"><table class="table table-sm mb-2"><thead><tr><th>#</th><th>Message</th><th class="text-center">Times</th><th>Last</th></tr></thead><tbody>';
 		foreach ($rRows as $rRow) {
-			foreach ($rErrors['by_source'][$rRow['index']] ?? [] as $n => [$rMessage, $rCount, $rLast]) {
+			foreach ($rErrors['by_source'][$rRow['index']] ?? [] as $n => [$rMessage, $rCount, $rLast, $rSure]) {
 				$rLaunches = (int) ($rErrors['launches'][$rRow['index']] ?? 0);
 				$rHtml .= '<tr>'
 					. ($n === 0 ? '<td rowspan="' . count($rErrors['by_source'][$rRow['index']]) . '">' . ((int) $rRow['index'] + 1) . '<br><small class="text-muted">' . $h(self::mask($rRow['source']))
 						. ($rLaunches > 0 ? '<br>' . $rLaunches . ' launch(es) logged' : '') . '</small></td>' : '')
-					. '<td><code class="text-wrap">' . $h($rMessage) . '</code></td><td class="text-center">' . (int) $rCount . '</td><td><small>' . $h(date('m-d H:i', $rLast)) . '</small></td></tr>';
+					. '<td><code class="text-wrap">' . $h($rMessage) . '</code> <small class="text-muted" title="' . ($rSure ? 'Every line names this source\'s host' : 'Some or all of these lines name no host: placed by time') . '">' . ($rSure ? '· by host' : '· by time') . '</small></td><td class="text-center">' . (int) $rCount . '</td><td><small>' . $h(date('m-d H:i', $rLast)) . '</small></td></tr>';
 			}
 		}
 		$rHtml .= '</tbody></table></div>';
@@ -153,7 +154,7 @@ final class SourceHealthTab {
 	 * @param array<string, array<string, mixed>> $rProfiles
 	 */
 	/** @param array<int, array<string, mixed>> $rRecent compute() over the last 24 h, keyed by source index */
-	private static function table(array $rRows, array $rRecent, array $rProfiles, int $rFrom, int $rNow): string {
+	private static function table(array $rRows, array $rRecent, array $rProfiles, int $rFrom, int $rNow, array $rAccounts = []): string {
 		$rOrder = SourceHealthCalculator::suggestedOrder($rRows);
 		$rByIndex = array_column($rRows, null, 'index');
 
@@ -191,7 +192,8 @@ final class SourceHealthTab {
 				: (($rRow['probe']['label'] ?? '') !== '' ? $h($rRow['probe']['label']) . ' (from probes)' : 'not seen on air yet');
 			$rHtml .= '<tr>'
 				. '<td>' . ((int) $rRow['index'] + 1) . ($rRow['running'] ? '<br><span class="badge bg-label-success" title="On air now">live</span>' : '') . '</td>'
-				. '<td><code title="' . $h(self::mask($rRow['source'])) . '">' . $h(self::mask($rRow['source'])) . '</code><br><small class="text-muted">' . $rProfileText . '</small></td>'
+				. '<td><code title="' . $h(self::mask($rRow['source'])) . '">' . $h(self::mask($rRow['source'])) . '</code><br><small class="text-muted">' . $rProfileText . '</small>'
+					. self::accountNote($rRow, $rAccounts) . '</td>'
 				. '<td class="text-center">' . self::scoreBadge($rRow['score'], (string) $rRow['confidence']) . '</td>'
 				. '<td class="text-center">' . self::recent($rRecent[$rRow['index']] ?? null) . '</td>'
 				. '<td class="text-center">' . self::probes($rRow['probe'] ?? null) . '</td>'
@@ -220,6 +222,21 @@ final class SourceHealthTab {
 			. 'Probes count as start attempts. The suggested order discounts scores that rest on little data (low confidence, or under an hour on air), so an untried source does not overtake a measured one. '
 			. 'Low confidence means little data. Profiles are recorded every 5 minutes while a source is on air.</p>';
 		return $rHtml;
+	}
+
+	/**
+	 * How many live connections the panel holds right now on this source's
+	 * provider account (same host and /user/pass/), besides this source itself.
+	 * Providers cap connections per account; past the cap they cut the oldest
+	 * ("source ended") and refuse new ones (404, an empty body, a web page).
+	 */
+	private static function accountNote(array $rRow, array $rAccounts): string {
+		$rKey = SourceProber::accountKey((string) $rRow['source']);
+		$rOthers = $rKey === null ? 0 : (int) ($rAccounts[$rKey] ?? 0) - ($rRow['running'] ? 1 : 0);
+		if ($rOthers <= 0) {
+			return '';
+		}
+		return '<br><small class="text-warning" title="Live connections the panel holds right now on the same provider account (host + user/pass), other than this source">account also used by ' . $rOthers . ' other live connection(s)</small>';
 	}
 
 	/** Last-24h cell: score and incident count, or "–" when the source was not tried. */

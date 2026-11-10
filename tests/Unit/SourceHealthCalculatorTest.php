@@ -192,9 +192,9 @@ final class SourceHealthCalculatorTest extends TestCase {
 		];
 		$rOut = SourceHealthCalculator::errorsBySource([self::A, self::B, self::C], $rEvents, $rErrors);
 
-		$this->assertSame([['HTTP error 509 Bandwidth Limit Exceeded', 2, 1996]], $rOut['by_source'][0]);
-		$this->assertSame([['(url) Connection refused', 1, 2008]], $rOut['by_source'][1]);
-		$this->assertSame(['Non-monotonous DTS in output stream #:#; previous: #, current: #', 2, 50000], $rOut['by_source'][2][0]);
+		$this->assertSame([['HTTP error 509 Bandwidth Limit Exceeded', 2, 1996, false]], $rOut['by_source'][0]);
+		$this->assertSame([['(url) Connection refused', 1, 2008, true]], $rOut['by_source'][1]);
+		$this->assertSame(['Non-monotonous DTS in output stream #:#; previous: #, current: #', 2, 50000, false], $rOut['by_source'][2][0]);
 		$this->assertSame(1, $rOut['unattributed']);
 	}
 
@@ -229,6 +229,7 @@ final class SourceHealthCalculatorTest extends TestCase {
 		$this->assertSame(2, $rOut['launches'][0]);
 		$this->assertSame(['source failed: read tcp (ip):#->(ip):#: i/o timeout', 'source failed: remux: unsupported source: (url) a web page, not a stream'], array_column($rOut['by_source'][0], 0));
 		$this->assertSame('info', SourceHealthCalculator::errorKind('2026/11/10 19:36:01 [remux] stopped'));
+		$this->assertSame('source failed: Get "(url)": EOF', SourceHealthCalculator::normalizeError('[remux] source failed: Get "http://a.example/live/u/p/1.ts": EOF'));
 		$this->assertSame('error', SourceHealthCalculator::errorKind('[http @ 0x55] HTTP error 403 Forbidden'));
 	}
 

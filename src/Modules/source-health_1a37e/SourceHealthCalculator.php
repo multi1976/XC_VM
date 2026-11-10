@@ -281,8 +281,8 @@ final class SourceHealthCalculator {
 	 * @param list<string> $rSources
 	 * @param list<array{server_id:int|string, action:string, source:?string, date:int|string}> $rEvents
 	 * @param list<array{server_id:int|string, date:int|string, error:string}> $rErrors
-	 * @return array{by_source: array<int, list<array{0:string, 1:int, 2:int}>>, launches: array<int, int>, unattributed: int, by_name: int, by_time: int}
-	 *         source index => [message, count, last time], most frequent first (top 5)
+	 * @return array{by_source: array<int, list<array{0:string, 1:int, 2:int, 3:bool}>>, launches: array<int, int>, unattributed: int, by_name: int, by_time: int}
+	 *         source index => [message, count, last time, every one placed by host], most frequent first (top 5)
 	 */
 	public static function errorsBySource(array $rSources, array $rEvents, array $rErrors, int $rSlack = 120): array {
 		$rIndex = [];
@@ -312,6 +312,7 @@ final class SourceHealthCalculator {
 			$t = self::lineTime($rText, (int) $rError['date']);
 
 			$rMatch = self::byName($rText, $rHosts);
+			$rNamed = $rMatch !== null;
 			if ($rMatch === null && preg_match('~^(Input #?\d+, )~', self::stripLogPrefix($rText))) {
 				continue; // an input line for a source not (or no longer) in the list
 			}
@@ -333,12 +334,13 @@ final class SourceHealthCalculator {
 			$rMessage = self::normalizeError($rText);
 			$rCounts[$rMatch][$rMessage][0] = ($rCounts[$rMatch][$rMessage][0] ?? 0) + 1;
 			$rCounts[$rMatch][$rMessage][1] = max($rCounts[$rMatch][$rMessage][1] ?? 0, $t);
+			$rCounts[$rMatch][$rMessage][2] = ($rCounts[$rMatch][$rMessage][2] ?? 0) + ($rNamed ? 1 : 0);
 		}
 		$rOut = [];
 		foreach ($rCounts as $i => $rMessages) {
 			uasort($rMessages, static fn (array $a, array $b): int => $b[0] <=> $a[0]);
-			foreach (array_slice($rMessages, 0, 5, true) as $rMessage => [$rN, $rLast]) {
-				$rOut[$i][] = [(string) $rMessage, $rN, $rLast];
+			foreach (array_slice($rMessages, 0, 5, true) as $rMessage => [$rN, $rLast, $rNamedN]) {
+				$rOut[$i][] = [(string) $rMessage, $rN, $rLast, $rNamedN === $rN];
 			}
 		}
 		return ['by_source' => $rOut, 'launches' => $rLaunches, 'unattributed' => $rUnattributed, 'by_name' => $rByName, 'by_time' => $rByTime];
@@ -438,7 +440,7 @@ final class SourceHealthCalculator {
 	/** One error line as a message to group by: no URLs, addresses or changing numbers. */
 	public static function normalizeError(string $rLine): string {
 		$rLine = self::stripLogPrefix(str_replace(['&lt;', '&gt;'], ['<', '>'], $rLine));
-		$rLine = (string) preg_replace('~[a-z]+://\S+~i', '(url)', $rLine);
+		$rLine = (string) preg_replace('~[a-z]+://[^\s"\']+~i', '(url)', $rLine);
 		$rLine = (string) preg_replace('~\[[\w-]+ @ 0x[0-9a-f]+\]\s*~i', '', $rLine);
 		$rLine = (string) preg_replace('~0x[0-9a-f]+~i', '', $rLine);
 		$rLine = (string) preg_replace('~\b\d{1,3}(\.\d{1,3}){3}\b~', '(ip)', $rLine);

@@ -129,6 +129,9 @@ final class SourceHealthProbeTest extends TestCase {
 			$this->assertSame([5], SourceHealthRepository::probeStreams());
 			$this->assertCount(2, SourceHealthRepository::probeCandidates([5]));
 			$this->assertSame(['http://a/1.ts'], SourceHealthRepository::onAirSources());
+			$rDb->query("INSERT INTO `streams_servers` (`stream_id`, `server_id`, `pid`, `stream_status`, `current_source`) VALUES (6, 1, 11, 0, 'http://a/7.ts'), (5, 2, 12, 0, 'http://a/1.ts'), (8, 1, 0, 1, 'http://a/9.ts')");
+			$this->assertSame(['http://a:/' => 3], SourceHealthRepository::accountConnections()); // two servers on one channel count twice; a stopped one not at all
+			$rDb->query('DELETE FROM `streams_servers` WHERE `stream_id` IN (6, 8) OR `server_id` = 2');
 
 			foreach ([[true, 900], [true, 1100], [false, null]] as $i => [$rOk, $rOpen]) {
 				SourceHealthRepository::saveProbe(5, 'http://b/2.ts', ['ok' => $rOk, 'open_ms' => $rOpen, 'speed' => $rOk ? 1.2 : null, 'label' => 'h264 1920x1080 25i', 'error' => $rOk ? '' : 'could not open: timed out'], 1000 + $i);
