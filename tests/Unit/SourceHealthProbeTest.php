@@ -140,6 +140,17 @@ final class SourceHealthProbeTest extends TestCase {
 			$this->assertSame([0, 'skip', 'on air'], [$rStats[md5('http://a/1.ts')]['total'], $rStats[md5('http://a/1.ts')]['last_kind'], $rStats[md5('http://a/1.ts')]['last_error']]);
 			$this->assertSame(1010, SourceHealthRepository::lastProbes([5])['5:' . md5('http://a/1.ts')]);
 
+			// The DB layer escapes < and > on read: shown text is restored once, not escaped twice.
+			SourceHealthRepository::saveProbe(5, 'http://b/2.ts', ['ok' => false, 'open_ms' => null, 'speed' => null, 'label' => '', 'error' => 'could not open: (source URL) <404>'], 2000);
+			$this->assertSame('could not open: (source URL) <404>', SourceHealthRepository::probeStats(5, 0)[md5('http://b/2.ts')]['last_error']);
+
+			$rDb->exec(InstallSchema::table('streams_errors'));
+			foreach ([[100, 'old'], [500, 'a'], [600, 'b']] as [$rDate, $rText]) {
+				$rDb->query('INSERT INTO `streams_errors` (`stream_id`, `server_id`, `date`, `error`) VALUES (5, 1, ?, ?)', $rDate, $rText);
+			}
+			$this->assertSame(['a', 'b'], array_column(SourceHealthRepository::errors(5, 200), 'error'));
+			$this->assertSame(['b'], array_column(SourceHealthRepository::errors(5, 200, 1), 'error'));
+
 			SourceHealthRepository::deleteForStreams([5]);
 			$this->assertSame([], SourceHealthRepository::probeStreams());
 			$this->assertSame([], SourceHealthRepository::probeStats(5, 0));

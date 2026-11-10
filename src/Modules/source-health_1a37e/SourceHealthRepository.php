@@ -142,6 +142,22 @@ final class SourceHealthRepository {
 		return $rRow ?: null;
 	}
 
+	/**
+	 * The stream's error lines (Stream Error Logs) since $rFrom, oldest first,
+	 * at most the newest $rLimit.
+	 *
+	 * @return list<array{server_id:int, date:int, error:string}>
+	 */
+	public static function errors(int $rStreamID, int $rFrom, int $rLimit = 20000): array {
+		$rRows = self::db()->fetchAll('SELECT `server_id`, `date`, `error` FROM `streams_errors` WHERE `stream_id` = ? AND `date` >= ? ORDER BY `id` DESC LIMIT ' . max(1, $rLimit), $rStreamID, $rFrom) ?: [];
+		return array_reverse($rRows);
+	}
+
+	/** The DB layer HTML-escapes < and > in every value it reads; text shown again must not be escaped twice. */
+	public static function raw(string $rValue): string {
+		return str_replace(['&lt;', '&gt;'], ['<', '>'], $rValue);
+	}
+
 	// ---- active probes ----
 
 	/** Probe results are kept this long (the report window). */
@@ -260,10 +276,10 @@ final class SourceHealthRepository {
 			$rStats[$rHash] ??= ['ok' => 0, 'total' => 0, 'skipped' => 0, 'skip_reason' => '', 'open_ms' => null, 'speed' => null, 'last_at' => 0, 'last_ok' => false, 'last_error' => '', 'last_kind' => '', 'label' => ''];
 			$rStats[$rHash]['last_at'] = (int) $rRow['checked_at'];
 			$rStats[$rHash]['last_kind'] = (string) $rRow['kind'];
-			$rStats[$rHash]['last_error'] = (string) $rRow['error'];
+			$rStats[$rHash]['last_error'] = self::raw((string) $rRow['error']);
 			if ($rRow['kind'] !== 'probe') {
 				$rStats[$rHash]['skipped']++;
-				$rStats[$rHash]['skip_reason'] = (string) $rRow['error'];
+				$rStats[$rHash]['skip_reason'] = self::raw((string) $rRow['error']);
 				continue;
 			}
 			$rStats[$rHash]['total']++;
@@ -274,7 +290,7 @@ final class SourceHealthRepository {
 				$rStats[$rHash]['speed'] = $rRow['speed'] !== null ? (float) $rRow['speed'] : null;
 			}
 			if ((string) $rRow['label'] !== '') {
-				$rStats[$rHash]['label'] = (string) $rRow['label'];
+				$rStats[$rHash]['label'] = self::raw((string) $rRow['label']);
 			}
 		}
 		foreach ($rOpen as $rHash => $rTimes) {

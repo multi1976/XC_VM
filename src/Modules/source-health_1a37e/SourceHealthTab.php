@@ -35,6 +35,7 @@ final class SourceHealthTab {
 			// The same log read over the last day only: what the source is like now.
 			$rRecent = array_column(SourceHealthCalculator::compute($rSources, $rEvents, $rDayFrom, $rNow, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rDayFrom)), null, 'index');
 			$rProbing = SourceHealthRepository::probeEnabled($rStreamID);
+			$rErrors = SourceHealthCalculator::errorsBySource($rSources, $rEvents, SourceHealthRepository::errors($rStreamID, $rFrom));
 			$rProfiles = SourceHealthRepository::profiles($rStreamID);
 		} catch (\Throwable $e) {
 			error_log('source-health: ' . $e->getMessage());
@@ -42,7 +43,37 @@ final class SourceHealthTab {
 		}
 
 		$rOpen = $rFullPage ? '' : '<p class="mb-2"><a href="./source_health?id=' . (int) $rStream['id'] . '" target="_blank" rel="noopener">Open this report as a full page ↗</a></p>';
-		return $rOpen . self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow) . self::timeline($rRows, $rFrom, $rNow);
+		return $rOpen . self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow) . self::timeline($rRows, $rFrom, $rNow) . self::errorSection($rRows, $rErrors);
+	}
+
+	/**
+	 * The encoder's own words, per source: the commonest error lines from the
+	 * panel's Stream Error Logs, each put with the source in use at the time.
+	 * This is what says WHY a source drops or does not start.
+	 *
+	 * @param list<array<string, mixed>> $rRows
+	 * @param array{by_source: array<int, list<array{0:string, 1:int, 2:int}>>, unattributed: int} $rErrors
+	 */
+	private static function errorSection(array $rRows, array $rErrors): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rHtml = '<h6 class="mt-4 mb-1">What the encoder reported</h6>'
+			. '<p class="text-muted small mb-2">The commonest lines from Stream Error Logs in the report window, each put with the source this server was using or starting within two minutes of it. Numbers are replaced by #, so repeats group together.</p>';
+		if ($rErrors['by_source'] === []) {
+			return $rHtml . '<p class="text-muted small mb-0">No error lines for this stream in the window' . ($rErrors['unattributed'] > 0 ? ' that could be put with a source (' . (int) $rErrors['unattributed'] . ' not placed)' : '') . '.</p>';
+		}
+		$rHtml .= '<div class="table-responsive"><table class="table table-sm mb-2"><thead><tr><th>#</th><th>Message</th><th class="text-center">Times</th><th>Last</th></tr></thead><tbody>';
+		foreach ($rRows as $rRow) {
+			foreach ($rErrors['by_source'][$rRow['index']] ?? [] as $n => [$rMessage, $rCount, $rLast]) {
+				$rHtml .= '<tr>'
+					. ($n === 0 ? '<td rowspan="' . count($rErrors['by_source'][$rRow['index']]) . '">' . ((int) $rRow['index'] + 1) . '<br><small class="text-muted">' . $h(self::mask($rRow['source'])) . '</small></td>' : '')
+					. '<td><code class="text-wrap">' . $h($rMessage) . '</code></td><td class="text-center">' . (int) $rCount . '</td><td><small>' . $h(date('m-d H:i', $rLast)) . '</small></td></tr>';
+			}
+		}
+		$rHtml .= '</tbody></table></div>';
+		if ($rErrors['unattributed'] > 0) {
+			$rHtml .= '<p class="text-muted small mb-0">' . (int) $rErrors['unattributed'] . ' line(s) could not be put with a source (no source event within two minutes on that server).</p>';
+		}
+		return $rHtml;
 	}
 
 	/** The opt-in for active probes of this stream's sources, saved at once (not with the form). */
@@ -149,7 +180,7 @@ final class SourceHealthTab {
 			$rGroup = $rProfile !== null ? ($rGroups[(string) $rProfile['fingerprint']] ?? '') : '';
 			$rMtbf = $rRow['incidents'] > 0 ? self::duration(intdiv((int) $rRow['uptime_sec'], (int) $rRow['incidents'])) : ($rRow['uptime_sec'] > 0 ? '&gt; ' . self::duration((int) $rRow['uptime_sec']) : '–');
 			$rProfileText = $rProfile !== null
-				? '<span class="badge bg-label-secondary">' . $h($rGroup) . '</span> ' . $h($rProfile['label'])
+				? '<span class="badge bg-label-secondary">' . $h($rGroup) . '</span> ' . $h(SourceHealthRepository::raw((string) $rProfile['label']))
 					. ((int) ($rProfile['bitrate'] ?? 0) > 0 ? ' · ' . round(((int) $rProfile['bitrate']) / 1000, 1) . ' Mbps' : '')
 				: (($rRow['probe']['label'] ?? '') !== '' ? $h($rRow['probe']['label']) . ' (from probes)' : 'not seen on air yet');
 			$rHtml .= '<tr>'

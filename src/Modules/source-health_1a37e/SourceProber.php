@@ -258,7 +258,7 @@ final class SourceProber {
 		$rLine = trim((string) strtok(trim($rErr), "\n"));
 		// ffmpeg errors repeat the URL, which carries the account: keep it out;
 		// and drop its "[tcp @ 0x55…]" context prefix.
-		$rLine = (string) preg_replace('~[a-z]+://\S+~i', '<source>', $rLine);
+		$rLine = (string) preg_replace('~[a-z]+://\S+~i', '(source URL)', $rLine);
 		$rLine = trim((string) preg_replace('~\[[\w-]+ @ 0x[0-9a-f]+\]\s*~i', '', $rLine));
 		return mb_substr($rWhat . ($rLine !== '' ? ': ' . $rLine : ' (exit ' . $rCode . ')'), 0, 250);
 	}

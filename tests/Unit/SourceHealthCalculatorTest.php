@@ -170,6 +170,34 @@ final class SourceHealthCalculatorTest extends TestCase {
 		$this->assertGreaterThanOrEqual(95, $rLastDay[0]['score']);
 	}
 
+	/**
+	 * 2026-11-10: a source probed 12/12 ok from outside had 289 failed starts
+	 * in the panel. The encoder's error lines say why; they carry no source, so
+	 * each is put with the source its server logged an event for nearest in time.
+	 */
+	public function testErrorLinesArePutWithTheSourceInUseAtTheTime(): void {
+		$rEvents = [
+			self::ev(1, 'STREAM_START', self::A, 1000),
+			self::ev(1, 'STREAM_FAILED', self::A, 2000),
+			self::ev(1, 'STREAM_START_FAIL', self::B, 2010),
+			self::ev(2, 'STREAM_START', self::C, 1000),
+		];
+		$rErrors = [
+			['server_id' => 1, 'date' => 1995, 'error' => '[http @ 0x55d4c3a1b2c0] HTTP error 509 Bandwidth Limit Exceeded'],   // just before A's drop
+			['server_id' => 1, 'date' => 1996, 'error' => '[http @ 0x55d4c3a1b9f0] HTTP error 509 Bandwidth Limit Exceeded'],
+			['server_id' => 1, 'date' => 2008, 'error' => 'http://b.example/live/u/p/1.ts: Connection refused'],                // B's failed start (after A's drop at 2000)
+			['server_id' => 2, 'date' => 1050, 'error' => 'Non-monotonous DTS in output stream 0:1; previous: 81234, current: 81000'],
+			['server_id' => 1, 'date' => 9000, 'error' => 'far from any event'],                                              // after B's failed start: nothing on air
+			['server_id' => 2, 'date' => 50000, 'error' => 'Non-monotonous DTS in output stream 0:1; previous: 9, current: 8'], // C's run, hours in
+		];
+		$rOut = SourceHealthCalculator::errorsBySource([self::A, self::B, self::C], $rEvents, $rErrors);
+
+		$this->assertSame([['HTTP error 509 Bandwidth Limit Exceeded', 2, 1996]], $rOut['by_source'][0]);
+		$this->assertSame([['(url) Connection refused', 1, 2008]], $rOut['by_source'][1]);
+		$this->assertSame(['Non-monotonous DTS in output stream #:#; previous: #, current: #', 2, 50000], $rOut['by_source'][2][0]);
+		$this->assertSame(1, $rOut['unattributed']);
+	}
+
 	public function testAFailedStartDoesNotHideTheNextDrop(): void {
 		$rRows = self::rows([
 			self::ev(1, 'STREAM_START_FAIL', self::A, 1000),

@@ -258,6 +258,85 @@ final class SourceHealthCalculator {
 		return array_map(static fn (array $r): int => (int) $r['index'], $rRows);
 	}
 
+	/**
+	 * Put the encoder's error lines (`streams_errors`: server, time, text, no
+	 * source) next to the source they belong to, on the same server:
+	 *   1. the next event within $rSlack/2 seconds — an error line comes a few
+	 *      seconds before the STREAM_FAILED or STREAM_START_FAIL it explains;
+	 *   2. else the run on air: the last event, if it started a run (however
+	 *      long ago), or any last event within $rSlack seconds.
+	 *
+	 * @param list<string> $rSources
+	 * @param list<array{server_id:int|string, action:string, source:?string, date:int|string}> $rEvents
+	 * @param list<array{server_id:int|string, date:int|string, error:string}> $rErrors
+	 * @return array{by_source: array<int, list<array{0:string, 1:int, 2:int}>>, unattributed: int}
+	 *         source index => [message, count, last time], most frequent first (top 5)
+	 */
+	public static function errorsBySource(array $rSources, array $rEvents, array $rErrors, int $rSlack = 120): array {
+		$rIndex = [];
+		foreach (array_values($rSources) as $i => $rSource) {
+			$rIndex[trim((string) $rSource)] ??= $i;
+		}
+		$rTimeline = [];
+		foreach ($rEvents as $rEvent) {
+			$rSrc = trim((string) ($rEvent['source'] ?? ''));
+			if (isset($rIndex[$rSrc])) {
+				$rTimeline[(int) $rEvent['server_id']][] = [(int) $rEvent['date'], $rIndex[$rSrc], in_array($rEvent['action'], self::OPEN, true)];
+			}
+		}
+		$rCounts = [];
+		$rUnattributed = 0;
+		foreach ($rErrors as $rError) {
+			$rLine = $rTimeline[(int) $rError['server_id']] ?? [];
+			$t = (int) $rError['date'];
+			$rBefore = $rAfter = null;
+			foreach ($rLine as $rEvent) {
+				if ($rEvent[0] < $t) {
+					$rBefore = $rEvent;
+				} else {
+					$rAfter = $rEvent;
+					break;
+				}
+			}
+			if ($rAfter !== null && $rAfter[0] - $t <= intdiv($rSlack, 2)) {
+				$rMatch = $rAfter[1];
+			} elseif ($rBefore !== null && ($rBefore[2] || $t - $rBefore[0] <= $rSlack)) {
+				$rMatch = $rBefore[1];
+			} else {
+				$rMatch = null;
+			}
+			if ($rMatch === null) {
+				$rUnattributed++;
+				continue;
+			}
+			$rMessage = self::normalizeError((string) $rError['error']);
+			$rCounts[$rMatch][$rMessage][0] = ($rCounts[$rMatch][$rMessage][0] ?? 0) + 1;
+			$rCounts[$rMatch][$rMessage][1] = max($rCounts[$rMatch][$rMessage][1] ?? 0, $t);
+		}
+		$rOut = [];
+		foreach ($rCounts as $i => $rMessages) {
+			uasort($rMessages, static fn (array $a, array $b): int => $b[0] <=> $a[0]);
+			foreach (array_slice($rMessages, 0, 5, true) as $rMessage => [$rN, $rLast]) {
+				$rOut[$i][] = [(string) $rMessage, $rN, $rLast];
+			}
+		}
+		return ['by_source' => $rOut, 'unattributed' => $rUnattributed];
+	}
+
+	/** One error line as a message to group by: no URLs, addresses or changing numbers. */
+	public static function normalizeError(string $rLine): string {
+		$rLine = str_replace(['&lt;', '&gt;'], ['<', '>'], $rLine);
+		$rLine = (string) preg_replace('~[a-z]+://\S+~i', '(url)', $rLine);
+		$rLine = (string) preg_replace('~\[[\w-]+ @ 0x[0-9a-f]+\]\s*~i', '', $rLine);
+		$rLine = (string) preg_replace('~0x[0-9a-f]+~i', '', $rLine);
+		// HTTP status codes say what went wrong (404, 403, 509): keep them, mask other numbers.
+		$rLine = (string) preg_replace('~\b(returned|error|HTTP)\s+(\d{3})\b~i', '$1 §$2§', $rLine);
+		$rLine = (string) preg_replace('~(?<!§)\b\d+(\.\d+)?\b(?!§)~', '#', $rLine);
+		$rLine = str_replace('§', '', $rLine);
+		$rLine = trim((string) preg_replace('~\s+~', ' ', $rLine));
+		return mb_substr($rLine, 0, 160);
+	}
+
 	/** @return array<string, mixed> */
 	private static function blank(int $rIndex, string $rSource): array {
 		return [
