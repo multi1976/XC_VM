@@ -52,6 +52,33 @@ final class SourceHealthProbeTest extends TestCase {
 		$this->assertCount(1, SourceProber::plan($rCandidates, $rLast, [$rLive], $rNow, 1)[0]);
 	}
 
+	/**
+	 * 2026-11-10: probes showed "80x" — the provider's connect burst (seconds
+	 * of buffered video at once) was taken for the read speed. The rate is now
+	 * measured after the burst.
+	 */
+	public function testSteadyRateIgnoresTheConnectBurst(): void {
+		// 10 s of buffer arrives in the first 0.3 s, then real time.
+		$rSamples = [[0.1, 5.0], [0.3, 10.0]];
+		for ($w = 0.5; $w <= 12.01; $w += 0.5) {
+			$rSamples[] = [$w, 10.0 + ($w - 0.3)];
+		}
+		$this->assertEqualsWithDelta(1.0, SourceProber::steadyRate($rSamples, false), 0.01);
+
+		// Slow source: 0.6 s of media per second after the burst.
+		$rSlow = [[0.2, 3.0]];
+		for ($w = 1.0; $w <= 12.01; $w += 1.0) {
+			$rSlow[] = [$w, 3.0 + 0.6 * $w];
+		}
+		$this->assertEqualsWithDelta(0.6, SourceProber::steadyRate($rSlow, false), 0.01);
+
+		// Stalled after the burst: no sample past 4 s.
+		$this->assertNull(SourceProber::steadyRate([[0.2, 8.0], [0.4, 9.0]], false));
+		// A short file that ended on its own: all of it, fast.
+		$this->assertSame(30.0, SourceProber::steadyRate([[0.2, 3.0], [0.4, 12.0]], true));
+		$this->assertNull(SourceProber::steadyRate([], true));
+	}
+
 	public function testARealProbeOverHttp(): void {
 		$rProbe = trim((string) shell_exec('command -v ffprobe'));
 		$rFfmpeg = trim((string) shell_exec('command -v ffmpeg'));

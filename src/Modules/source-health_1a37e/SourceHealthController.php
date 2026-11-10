@@ -2,14 +2,36 @@
 
 namespace XcVm\Module\SourceHealth;
 
+use XcVm\Core\Auth\Authorization;
 use XcVm\Core\Http\RequestManager;
+use XcVm\Core\Util\AdminHelpers;
+use XcVm\Core\Util\LayoutRenderer;
 use XcVm\Public\Controllers\Admin\Ajax\BaseAjaxController;
 
 /**
- * `api?action=source_health_probe` — turn active probes of one stream's
- * sources on or off (the switch on the Source Health tab).
+ * The Source Health full page (`source_health?id=N`) and
+ * `api?action=source_health_probe`, which turns active probes of one
+ * stream's sources on or off (the switch on the report).
  */
 class SourceHealthController extends BaseAjaxController {
+	/** `source_health?id=N` — the report on a full page (the Edit Stream tab sits in a narrow modal). */
+	public function page(): void {
+		if (!Authorization::check('adv', 'edit_stream')) {
+			AdminHelpers::goHome();
+			exit;
+		}
+		$rStream = SourceHealthRepository::stream((int) RequestManager::get('id', 0));
+		$GLOBALS['_TITLE'] = 'Source Health';
+		LayoutRenderer::renderHeader('admin');
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		echo '<div class="card"><div class="card-header"><h5 class="card-title mb-0">Source Health'
+			. ($rStream !== null ? ' — ' . $h($rStream['stream_display_name']) . ' <small class="text-muted">#' . (int) $rStream['id'] . '</small>' : '') . '</h5></div><div class="card-body">'
+			. ($rStream !== null ? SourceHealthTab::render($rStream, 'edit', true) : '<p class="text-muted mb-0">No such live stream.</p>')
+			. '</div></div>';
+		LayoutRenderer::renderFooter('admin');
+		echo '</body></html>';
+	}
+
 	public function probe(): never {
 		$this->requireXhr();
 		$this->gateAny([['adv', 'edit_stream']]);

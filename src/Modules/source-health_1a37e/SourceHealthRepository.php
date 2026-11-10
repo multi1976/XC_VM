@@ -136,6 +136,12 @@ final class SourceHealthRepository {
 		}
 	}
 
+	/** @return array{id:int, stream_display_name:string, stream_source:string}|null a live stream */
+	public static function stream(int $rStreamID): ?array {
+		$rRow = self::db()->fetchOne('SELECT `id`, `stream_display_name`, `stream_source` FROM `streams` WHERE `id` = ? AND `type` = 1', $rStreamID);
+		return $rRow ?: null;
+	}
+
 	// ---- active probes ----
 
 	/** Probe results are kept this long (the report window). */
@@ -243,7 +249,7 @@ final class SourceHealthRepository {
 	/**
 	 * Probe results per source since $rFrom.
 	 *
-	 * @return array<string, array{ok:int, total:int, open_ms:?int, speed:?float, last_at:int, last_ok:bool, last_error:string, last_kind:string, label:string}>
+	 * @return array<string, array{ok:int, total:int, skipped:int, skip_reason:string, open_ms:?int, speed:?float, last_at:int, last_ok:bool, last_error:string, last_kind:string, label:string}>
 	 */
 	public static function probeStats(int $rStreamID, int $rFrom): array {
 		$rRows = self::db()->fetchAll('SELECT `source_hash`, `checked_at`, `kind`, `ok`, `open_ms`, `speed`, `label`, `error` FROM `source_health_probes` WHERE `stream_id` = ? AND `checked_at` >= ? ORDER BY `checked_at` ASC', $rStreamID, $rFrom) ?: [];
@@ -251,11 +257,13 @@ final class SourceHealthRepository {
 		$rOpen = [];
 		foreach ($rRows as $rRow) {
 			$rHash = (string) $rRow['source_hash'];
-			$rStats[$rHash] ??= ['ok' => 0, 'total' => 0, 'open_ms' => null, 'speed' => null, 'last_at' => 0, 'last_ok' => false, 'last_error' => '', 'last_kind' => '', 'label' => ''];
+			$rStats[$rHash] ??= ['ok' => 0, 'total' => 0, 'skipped' => 0, 'skip_reason' => '', 'open_ms' => null, 'speed' => null, 'last_at' => 0, 'last_ok' => false, 'last_error' => '', 'last_kind' => '', 'label' => ''];
 			$rStats[$rHash]['last_at'] = (int) $rRow['checked_at'];
 			$rStats[$rHash]['last_kind'] = (string) $rRow['kind'];
 			$rStats[$rHash]['last_error'] = (string) $rRow['error'];
 			if ($rRow['kind'] !== 'probe') {
+				$rStats[$rHash]['skipped']++;
+				$rStats[$rHash]['skip_reason'] = (string) $rRow['error'];
 				continue;
 			}
 			$rStats[$rHash]['total']++;

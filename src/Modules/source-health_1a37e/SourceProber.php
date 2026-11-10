@@ -27,8 +27,10 @@ final class SourceProber {
 	public const MAX_PER_RUN = 6;
 	/** Stop starting new probes after this long in one run. */
 	public const RUN_BUDGET_SEC = 200;
-	/** Seconds of media a probe reads. */
+	/** Seconds of wall time a probe measures the read rate over… */
 	public const PROBE_READ_SEC = 8;
+	/** …after skipping this many: servers send a buffered burst on connect, which says nothing about keeping up. */
+	public const BURST_SEC = 4;
 	/** Schemes a probe can open from MAIN. */
 	public const SCHEMES = ['http', 'https', 'rtmp', 'rtmps', 'rtsp'];
 
@@ -155,16 +157,98 @@ final class SourceProber {
 		}
 		$rFp = SourceFingerprint::fromStreamInfo(['codecs' => ['video' => $rCodecs['video'] ?? [], 'audio' => $rCodecs['audio'] ?? []]]);
 
-		$rStart = microtime(true);
-		[$rCode, , $rErr] = self::exec(array_merge(['timeout', (string) (self::PROBE_READ_SEC + 22), $rFfmpeg, '-nostdin', '-hide_banner', '-v', 'error'], $rNet, ['-i', $rUrl, '-t', (string) self::PROBE_READ_SEC, '-map', '0:v?', '-map', '0:a?', '-c', 'copy', '-f', 'null', '-']));
-		$rWall = microtime(true) - $rStart;
-		// Opening again costs about what ffprobe's open did; the rest is reading.
-		$rSpeed = round(self::PROBE_READ_SEC / max(0.1, $rWall - $rOpenMs / 1000), 2);
-		if ($rCode !== 0) {
-			return ['ok' => false, 'open_ms' => $rOpenMs, 'speed' => null, 'label' => (string) ($rFp['label'] ?? ''), 'error' => self::why($rCode, $rErr, 'stopped while reading')];
+		[$rCode, $rSamples, $rErr] = self::read(array_merge([$rFfmpeg, '-nostdin', '-hide_banner', '-v', 'error', '-nostats', '-progress', 'pipe:1'], $rNet, ['-i', $rUrl, '-map', '0:v?', '-map', '0:a?', '-c', 'copy', '-f', 'null', '-']), self::BURST_SEC + self::PROBE_READ_SEC);
+		$rLabel = (string) ($rFp['label'] ?? '');
+		if ($rCode !== 0 && $rCode !== -1) {
+			return ['ok' => false, 'open_ms' => $rOpenMs, 'speed' => null, 'label' => $rLabel, 'error' => self::why($rCode, $rErr, 'stopped while reading')];
+		}
+		$rSpeed = self::steadyRate($rSamples, $rCode === 0);
+		if ($rSpeed === null) {
+			return ['ok' => false, 'open_ms' => $rOpenMs, 'speed' => null, 'label' => $rLabel, 'error' => 'no data after the first ' . self::BURST_SEC . ' s'];
 		}
 		$rSlow = $rSpeed < 0.9;
-		return ['ok' => !$rSlow, 'open_ms' => $rOpenMs, 'speed' => $rSpeed, 'label' => (string) ($rFp['label'] ?? ''), 'error' => $rSlow ? 'slower than real time (' . $rSpeed . 'x)' : ''];
+		return ['ok' => !$rSlow, 'open_ms' => $rOpenMs, 'speed' => $rSpeed, 'label' => $rLabel, 'error' => $rSlow ? 'slower than real time (' . $rSpeed . 'x)' : ''];
+	}
+
+	/**
+	 * Media seconds received per wall second once the connect burst is over:
+	 * from the first progress sample at or after BURST_SEC to the last one.
+	 * A source that ended on its own before that (a short file) delivered all
+	 * of it faster than real time: its rate is the whole read. PURE.
+	 *
+	 * @param list<array{0: float, 1: float}> $rSamples [wall seconds since start, media seconds out]
+	 */
+	public static function steadyRate(array $rSamples, bool $rEnded): ?float {
+		if ($rSamples === []) {
+			return null;
+		}
+		$rFirst = null;
+		foreach ($rSamples as $rSample) {
+			if ($rSample[0] >= self::BURST_SEC) {
+				$rFirst = $rSample;
+				break;
+			}
+		}
+		$rLast = $rSamples[count($rSamples) - 1];
+		if ($rFirst === null || $rLast[0] - $rFirst[0] < 1.0) {
+			if (!$rEnded) {
+				return null;
+			}
+			return round(min(99.0, $rLast[1] / max(0.1, $rLast[0])), 2);
+		}
+		return round(min(99.0, ($rLast[1] - $rFirst[1]) / ($rLast[0] - $rFirst[0])), 2);
+	}
+
+	/**
+	 * Run ffmpeg with -progress on stdout for at most $rSeconds, sampling its
+	 * media position (out_time_us) against wall time.
+	 *
+	 * @param list<string> $rCommand
+	 * @return array{0: int, 1: list<array{0: float, 1: float}>, 2: string} [exit code, -1 when stopped at the time limit; samples; stderr]
+	 */
+	private static function read(array $rCommand, int $rSeconds): array {
+		$rProc = proc_open($rCommand, [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $rPipes);
+		if (!is_resource($rProc)) {
+			return [127, [], 'could not start ' . $rCommand[0]];
+		}
+		stream_set_blocking($rPipes[1], false);
+		stream_set_blocking($rPipes[2], false);
+		$rStart = microtime(true);
+		$rSamples = [];
+		$rBuffer = $rErr = '';
+		$rStopped = false;
+		while (true) {
+			$rRead = [$rPipes[1], $rPipes[2]];
+			$rWrite = $rExcept = null;
+			@stream_select($rRead, $rWrite, $rExcept, 0, 200000);
+			foreach ($rRead as $rPipe) {
+				$rChunk = (string) fread($rPipe, 65536);
+				if ($rPipe === $rPipes[2]) {
+					$rErr = strlen($rErr) < 65536 ? $rErr . $rChunk : $rErr;
+					continue;
+				}
+				$rBuffer .= $rChunk;
+				while (($rPos = strpos($rBuffer, "\n")) !== false) {
+					$rLine = substr($rBuffer, 0, $rPos);
+					$rBuffer = substr($rBuffer, $rPos + 1);
+					if (str_starts_with($rLine, 'out_time_us=') && is_numeric(substr($rLine, 12))) {
+						$rSamples[] = [microtime(true) - $rStart, ((int) substr($rLine, 12)) / 1e6];
+					}
+				}
+			}
+			if (feof($rPipes[1]) && feof($rPipes[2])) {
+				break;
+			}
+			if (microtime(true) - $rStart >= $rSeconds) {
+				$rStopped = true;
+				proc_terminate($rProc, 9);
+				break;
+			}
+		}
+		fclose($rPipes[1]);
+		fclose($rPipes[2]);
+		$rCode = proc_close($rProc);
+		return [$rStopped ? -1 : $rCode, $rSamples, $rErr];
 	}
 
 	private static function why(int $rCode, string $rErr, string $rWhat): string {
@@ -172,8 +256,10 @@ final class SourceProber {
 			return $rWhat . ': timed out';
 		}
 		$rLine = trim((string) strtok(trim($rErr), "\n"));
-		// ffmpeg errors repeat the URL, which carries the account: keep it out.
+		// ffmpeg errors repeat the URL, which carries the account: keep it out;
+		// and drop its "[tcp @ 0x55…]" context prefix.
 		$rLine = (string) preg_replace('~[a-z]+://\S+~i', '<source>', $rLine);
+		$rLine = trim((string) preg_replace('~\[[\w-]+ @ 0x[0-9a-f]+\]\s*~i', '', $rLine));
 		return mb_substr($rWhat . ($rLine !== '' ? ': ' . $rLine : ' (exit ' . $rCode . ')'), 0, 250);
 	}
 

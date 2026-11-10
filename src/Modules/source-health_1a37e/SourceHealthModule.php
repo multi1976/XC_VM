@@ -23,7 +23,7 @@ class SourceHealthModule extends BaseModule {
 	}
 
 	public function getVersion(): string {
-		return '0.1.4';
+		return '0.1.5';
 	}
 
 	public function boot(ServiceContainer $container): void {
@@ -35,6 +35,7 @@ class SourceHealthModule extends BaseModule {
 	}
 
 	public function registerRoutes(Router $router): void {
+		$router->get('source_health', [SourceHealthController::class, 'page'], ['permission' => static fn (): bool => \XcVm\Core\Auth\Authorization::check('adv', 'edit_stream')]);
 		$router->api('source_health_probe', [SourceHealthController::class, 'probe']);
 	}
 
