@@ -181,7 +181,8 @@ final class SourceAuditPage {
 			. 'An account added here becomes a Stream Provider exactly as through <em>Add Provider</em>: the core then fetches its details and channel lists every hour, '
 			. 'and Source Audit uses that list to tell a channel the provider has dropped, and which channel carries its name now, without opening a stream.</p>'
 			. '<div class="alert alert-warning small py-2">The hourly provider sync downloads each provider\'s full live, VOD and series lists, one provider after another, and the core stops it after five minutes in all: '
-			. 'with many providers, the last ones may not be synced every hour. Accounts of one host usually share one catalogue.</div>';
+			. 'with many providers, the last ones may not be synced every hour. Accounts added here are set to sync their live channels only (on a panel that supports per-list sync), '
+			. 'which is all the audit needs; change it per provider in its form.</div>';
 		if ($rFound === []) {
 			return $rHtml . '<p class="text-muted mb-0">No Xtream-style accounts in the sources.</p>';
 		}

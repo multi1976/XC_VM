@@ -256,7 +256,7 @@ final class SourceAuditTest extends TestCase {
 		$this->assertNull(ProviderImport::channelId('http://h.example/u/p/ts'));
 		$this->assertSame('rtsh 1', ProviderImport::normalizeName('AL: RTSH 1 HD'));
 		$this->assertSame(ProviderImport::normalizeName('Top Channel FHD'), ProviderImport::normalizeName('|AL| TOP CHANNEL'));
-		$this->assertSame(['name' => 'h.example – u', 'ip' => 'h.example', 'port' => '8443', 'username' => 'u', 'password' => 'p', 'legacy' => 1, 'enabled' => 1, 'ssl' => 1, 'hls' => 1],
+		$this->assertSame(['name' => 'h.example – u', 'ip' => 'h.example', 'port' => '8443', 'username' => 'u', 'password' => 'p', 'legacy' => 1, 'enabled' => 1, 'sync_form' => 1, 'sync_live' => 1, 'ssl' => 1, 'hls' => 1],
 			ProviderImport::formData(['host' => 'h.example', 'scheme' => 'https', 'port' => 8443, 'user' => 'u', 'pass' => 'p', 'hls' => true]));
 
 		$rDb = new TestDb();

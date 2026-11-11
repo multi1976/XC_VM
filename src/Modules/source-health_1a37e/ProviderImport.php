@@ -108,6 +108,10 @@ final class ProviderImport {
 		if ($rEnabled) {
 			$rData['enabled'] = 1;
 		}
+		// Live channels only: the audit needs the channel list, not the
+		// provider's VOD and series. A core without per-list sync ignores these.
+		$rData['sync_form'] = 1;
+		$rData['sync_live'] = 1;
 		if ($rAcct['scheme'] === 'https') {
 			$rData['ssl'] = 1;
 		}
