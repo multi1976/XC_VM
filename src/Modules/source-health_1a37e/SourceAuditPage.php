@@ -21,6 +21,12 @@ final class SourceAuditPage {
 	/** @param array<string, mixed> $rQuery the page's GET parameters (status, host) */
 	public static function render(array $rQuery, int $rNow): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rView = ($rQuery['view'] ?? '') === 'accounts' ? 'accounts' : 'sources';
+		$rTabs = '<ul class="nav nav-tabs mb-3"><li class="nav-item"><a class="nav-link' . ($rView === 'sources' ? ' active' : '') . '" href="./source_audit">Sources</a></li>'
+			. '<li class="nav-item"><a class="nav-link' . ($rView === 'accounts' ? ' active' : '') . '" href="./source_audit?view=accounts">Provider accounts</a></li></ul>';
+		if ($rView === 'accounts') {
+			return $rTabs . self::accounts($rNow);
+		}
 		$rState = SourceHealthRepository::auditState();
 		$rAccounts = SourceHealthRepository::accounts();
 		$rOnAir = SourceHealthRepository::onAirSources();
@@ -77,7 +83,7 @@ final class SourceAuditPage {
 		usort($rShown, static fn (array $a, array $b): int => [self::rank($a['status']), $a['stream']['name']] <=> [self::rank($b['status']), $b['stream']['name']]);
 
 		$rLink = static fn (string $rStatus, string $rHost = ''): string => './source_audit?status=' . rawurlencode($rStatus) . ($rHost !== '' ? '&host=' . rawurlencode($rHost) : '') . ($rSearch !== '' ? '&q=' . rawurlencode($rSearch) : '');
-		$rHtml = '<p class="text-muted small">Every source of every live stream, checked with one short HTTP request (first 2 KB, no ffmpeg): about once a day while it answers, every '
+		$rHtml = $rTabs . '<p class="text-muted small">Every source of every live stream, checked with one short HTTP request (first 2 KB, no ffmpeg): about once a day while it answers, every '
 			. intdiv(SourceAudit::FAIL_INTERVAL_SEC, 3600) . ' h while it does not, at most ' . SourceAudit::PER_HOST_PER_RUN . ' per provider every five minutes. '
 			. 'A source on air is never checked; one on a provider account a live stream is using only when the provider\'s own API says the account has a connection to spare. '
 			. 'The provider API also reports expired, banned or refused accounts. Read-only: nothing here changes a stream.</p>'
@@ -132,7 +138,9 @@ final class SourceAuditPage {
 		}
 		$rHtml .= '<div class="table-responsive"><table class="table table-sm"><thead><tr><th>Stream</th><th class="text-center">#</th><th>Source</th><th>State</th><th>Reason</th>'
 			. '<th>Off since</th><th>Last seen up</th><th>Checked</th><th></th></tr></thead><tbody>';
+		$rChannels = ProviderImport::channelCheck(array_map(static fn (array $r): array => ['source' => $r['source'], 'name' => $r['stream']['name']], array_slice($rShown, 0, self::MAX_ROWS)));
 		foreach (array_slice($rShown, 0, self::MAX_ROWS) as $r) {
+			$rChannel = $rChannels[md5($r['source'])] ?? null;
 			$rAudit = $r['audit'];
 			[$rLabel, $rClass, $rTitle] = self::LABELS[$r['status']];
 			$rKind = $rAudit !== null && $rAudit['kind'] !== null ? (string) $rAudit['kind'] : null;
@@ -145,6 +153,10 @@ final class SourceAuditPage {
 				. ($rAudit !== null && (int) $rAudit['fails'] > 0 ? '<br><small class="text-muted">' . (int) $rAudit['fails'] . ' failed check(s)</small>' : '')
 				. self::accountNote($r['account'], $rNow) . '</td>'
 				. '<td><small>' . ($rAudit !== null && $rAudit['reason'] !== '' ? '<code class="text-wrap">' . $h($rAudit['reason']) . '</code>' : '') . '</small>'
+				. ($rChannel !== null && !$rChannel['listed']
+					? '<br><small class="text-danger" title="The channel id in this source is not in the channel list the panel last fetched for Stream Provider ' . $h($rChannel['provider']) . '">not in the provider\'s channel list</small>'
+						. ($rChannel['suggest'] !== [] ? '<br><small class="text-success">same name there: ' . implode(', ', array_map(static fn (array $c): string => 'ID ' . $c['id'] . ' (' . $h($c['name']) . ')', $rChannel['suggest'])) . '</small>' : '')
+					: '')
 				. ($rKind === 'gone' ? ' <span class="badge bg-label-danger">permanent</span>' : '') . ($rKind === 'temporary' ? ' <span class="badge bg-label-secondary">temporary</span>' : '') . '</td>'
 				. '<td><small>' . ($rAudit !== null && (int) $rAudit['first_fail'] > 0 ? $rWhen((int) $rAudit['first_fail']) : '<span class="text-muted">–</span>') . '</small></td>'
 				. '<td><small>' . ($rAudit !== null ? $rWhen((int) $rAudit['last_ok']) : '<span class="text-muted">–</span>') . '</small></td>'
@@ -156,6 +168,69 @@ final class SourceAuditPage {
 			$rHtml .= '<p class="text-muted small">Showing the first ' . self::MAX_ROWS . ' of ' . count($rShown) . '; filter by provider to see the rest.</p>';
 		}
 		return $rHtml;
+	}
+
+	/** The Provider accounts view: every account the sources use, and whether it is a Stream Provider. */
+	private static function accounts(int $rNow): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rFound = ProviderImport::discover();
+		$rInfo = SourceHealthRepository::accounts();
+		uasort($rFound, static fn (array $a, array $b): int => [$a['provider'] !== null, $a['host'], $a['user']] <=> [$b['provider'] !== null, $b['host'], $b['user']]);
+		$rNew = array_keys(array_filter($rFound, static fn (array $a): bool => $a['provider'] === null));
+		$rHtml = '<p class="text-muted small">The provider accounts found in the sources of live streams (Xtream-style URLs: host, port, username, password). '
+			. 'An account added here becomes a Stream Provider exactly as through <em>Add Provider</em>: the core then fetches its details and channel lists every hour, '
+			. 'and Source Audit uses that list to tell a channel the provider has dropped, and which channel carries its name now, without opening a stream.</p>'
+			. '<div class="alert alert-warning small py-2">The hourly provider sync downloads each provider\'s full live, VOD and series lists, one provider after another, and the core stops it after five minutes in all: '
+			. 'with many providers, the last ones may not be synced every hour. Accounts of one host usually share one catalogue.</div>';
+		if ($rFound === []) {
+			return $rHtml . '<p class="text-muted mb-0">No Xtream-style accounts in the sources.</p>';
+		}
+		$rHtml .= '<div class="d-flex flex-wrap align-items-center gap-2 mb-2">'
+			. '<button type="button" class="btn btn-sm btn-primary" id="sa-add-selected" disabled>Add selected to Stream Providers</button>'
+			. ($rNew !== [] ? '<button type="button" class="btn btn-sm btn-outline-primary" id="sa-add-all" data-hashes="' . $h(json_encode($rNew)) . '">Add all not yet added (' . count($rNew) . ')</button>' : '')
+			. '<label class="small ms-2"><input type="checkbox" id="sa-add-enabled" checked> enabled (hourly sync)</label>'
+			. '<span class="small text-muted ms-auto">' . count($rFound) . ' accounts · ' . (count($rFound) - count($rNew)) . ' already Stream Providers</span></div>'
+			. '<div class="table-responsive"><table class="table table-sm"><thead><tr><th><input type="checkbox" id="sa-all"></th><th>Host</th><th>Port</th><th>User</th><th>Provider API</th>'
+			. '<th class="text-center">Connections</th><th>Expires</th><th class="text-center">Sources</th><th class="text-center">Streams</th><th>Stream Provider</th></tr></thead><tbody>';
+		foreach ($rFound as $rHash => $rAcct) {
+			$rApi = $rInfo[$rHash] ?? null;
+			$rDead = ProviderAccount::deadReason($rApi, $rNow);
+			$rUser = mb_substr($rAcct['user'], 0, 3) . (mb_strlen($rAcct['user']) > 3 ? '…' : '');
+			$rHtml .= '<tr><td>' . ($rAcct['provider'] === null ? '<input type="checkbox" class="sa-acct" value="' . $h($rHash) . '">' : '') . '</td>'
+				. '<td>' . $h($rAcct['host']) . '</td><td>' . (int) $rAcct['port'] . '</td><td><code>' . $h($rUser) . '</code></td>'
+				. '<td><small>' . ($rApi === null ? '<span class="text-muted">not asked yet</span>' : (!$rApi['api'] ? '<span class="text-muted">no answer</span>'
+					: ($rDead !== null ? '<span class="text-danger">' . $h(substr($rDead, 9)) . '</span>' : '<span class="text-success">' . $h($rApi['status'] ?: 'active') . '</span>'))) . '</small></td>'
+				. '<td class="text-center"><small>' . ($rApi !== null && $rApi['api'] && $rApi['max'] !== null ? (int) $rApi['active'] . ' / ' . (int) $rApi['max'] : '–') . '</small></td>'
+				. '<td><small>' . ($rApi !== null && $rApi['exp'] !== null ? $h(date('Y-m-d', $rApi['exp'])) : '–') . '</small></td>'
+				. '<td class="text-center">' . (int) $rAcct['sources'] . '</td><td class="text-center">' . count($rAcct['streams']) . '</td>'
+				. '<td>' . ($rAcct['provider'] !== null
+					? '<a href="./provider?id=' . (int) $rAcct['provider']['id'] . '" target="_blank" rel="noopener">' . $h($rAcct['provider']['name']) . '</a>'
+						. (!$rAcct['provider']['enabled'] ? ' <span class="badge bg-label-secondary">disabled</span>' : '')
+						. ($rAcct['provider']['enabled'] && (int) ($rAcct['provider']['data']['streams'] ?? 0) > 0 ? ' <small class="text-muted">' . (int) $rAcct['provider']['data']['streams'] . ' channels</small>' : '')
+					: '<span class="text-muted">–</span>') . '</td></tr>';
+		}
+		return $rHtml . '</tbody></table></div>' . <<<'JS'
+<script>
+(function () {
+	var sel = document.getElementById('sa-add-selected'), all = document.getElementById('sa-all');
+	function picked() { return Array.prototype.map.call(document.querySelectorAll('.sa-acct:checked'), function (c) { return c.value; }); }
+	function sync() { sel.disabled = picked().length === 0; sel.textContent = 'Add selected to Stream Providers' + (picked().length ? ' (' + picked().length + ')' : ''); }
+	document.querySelectorAll('.sa-acct').forEach(function (c) { c.addEventListener('change', sync); });
+	if (all) { all.addEventListener('change', function () { document.querySelectorAll('.sa-acct').forEach(function (c) { c.checked = all.checked; }); sync(); }); }
+	function add(hashes, btn) {
+		if (!hashes.length || !confirm('Add ' + hashes.length + ' account(s) to Stream Providers?')) { return; }
+		btn.disabled = true; btn.textContent = 'Adding…';
+		jQuery.post('./api?action=source_audit_providers', {hashes: JSON.stringify(hashes), enabled: document.getElementById('sa-add-enabled').checked ? 1 : 0}, function (r) {
+			if (r && r.result) { alert(r.added + ' added, ' + r.existing + ' already there' + (r.failed ? ', ' + r.failed + ' failed' : '') + '.'); location.reload(); }
+			else { btn.textContent = 'Failed'; }
+		}, 'json').fail(function () { btn.disabled = false; btn.textContent = 'Failed: retry'; });
+	}
+	sel.addEventListener('click', function () { add(picked(), sel); });
+	var a = document.getElementById('sa-add-all');
+	if (a) { a.addEventListener('click', function () { add(JSON.parse(a.dataset.hashes), a); }); }
+})();
+</script>
+JS;
 	}
 
 	/** @param array{api:bool, auth:?bool, status:string, max:?int, active:?int, exp:?int, checked_at:int}|null $rAcct */

@@ -41,7 +41,7 @@ class SourceHealthController extends BaseAjaxController {
 		$GLOBALS['_TITLE'] = 'Source Audit';
 		LayoutRenderer::renderHeader('admin');
 		try {
-			$rBody = SourceAuditPage::render(['status' => RequestManager::get('status', 'problems'), 'host' => RequestManager::get('host', ''), 'q' => RequestManager::get('q', '')], time());
+			$rBody = SourceAuditPage::render(['status' => RequestManager::get('status', 'problems'), 'host' => RequestManager::get('host', ''), 'q' => RequestManager::get('q', ''), 'view' => RequestManager::get('view', '')], time());
 		} catch (\Throwable $e) {
 			error_log('source-health audit: ' . $e->getMessage());
 			$rBody = '<p class="text-danger mb-0">The audit could not be shown: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES) . '</p>';
@@ -68,6 +68,18 @@ class SourceHealthController extends BaseAjaxController {
 		}
 		$rResult = SourceAudit::recheckNow((int) RequestManager::get('stream_id', 0), $rHash);
 		$rResult['ok'] ? $this->ok(['message' => $rResult['message']]) : $this->fail(['message' => $rResult['message']]);
+	}
+
+	/** `api?action=source_audit_providers` — add accounts found in sources to Stream Providers (through the core's own provider service). */
+	public function providers(): never {
+		$this->requireXhr();
+		$this->gateAny([['adv', 'streams']]);
+		$rHashes = json_decode((string) RequestManager::get('hashes', ''), true);
+		if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST' || !is_array($rHashes)) {
+			$this->fail();
+		}
+		$rHashes = array_values(array_filter($rHashes, static fn ($h): bool => is_string($h) && preg_match('/^[0-9a-f]{32}$/', $h) === 1));
+		$this->ok(ProviderImport::add($rHashes, (bool) RequestManager::get('enabled', 1)));
 	}
 
 	public function probe(): never {

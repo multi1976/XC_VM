@@ -5,6 +5,7 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 use XcVm\Infrastructure\Database\DatabaseFactory;
 use XcVm\Module\SourceHealth\ProviderAccount;
+use XcVm\Module\SourceHealth\ProviderImport;
 use XcVm\Module\SourceHealth\SourceAudit;
 use XcVm\Module\SourceHealth\SourceAuditPage;
 use XcVm\Module\SourceHealth\SourceHealthRepository;
@@ -20,7 +21,7 @@ final class SourceAuditTest extends TestCase {
 		if ($rDir === null) {
 			self::markTestSkipped('The source-health module is not installed in this tree.');
 		}
-		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'SourceAudit', 'SourceAuditPage'] as $rClass) {
+		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceAuditPage'] as $rClass) {
 			require_once $rDir . '/' . $rClass . '.php';
 		}
 	}
@@ -155,7 +156,7 @@ final class SourceAuditTest extends TestCase {
 
 	public function testStateIsStoredPrunedAndShown(): void {
 		$rDb = new TestDb();
-		foreach (['streams', 'streams_servers'] as $rTable) {
+		foreach (['streams', 'streams_servers', 'providers', 'providers_streams'] as $rTable) {
 			$rDb->exec(InstallSchema::table($rTable));
 		}
 		$rSchema = (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/source-health_*')[0] . '/database.sql');
@@ -245,6 +246,58 @@ final class SourceAuditTest extends TestCase {
 			proc_close($rServer);
 			array_map('unlink', glob($rDir . '/*'));
 			@rmdir($rDir);
+			DatabaseFactory::reset();
+		}
+	}
+
+	public function testAccountsInSourcesBecomeStreamProvidersThroughTheCoreService(): void {
+		$this->assertSame(70, ProviderImport::channelId('http://h.example/live/u/p/70.ts'));
+		$this->assertSame(1138, ProviderImport::channelId('http://h.example/u/p/1138'));
+		$this->assertNull(ProviderImport::channelId('http://h.example/u/p/ts'));
+		$this->assertSame('rtsh 1', ProviderImport::normalizeName('AL: RTSH 1 HD'));
+		$this->assertSame(ProviderImport::normalizeName('Top Channel FHD'), ProviderImport::normalizeName('|AL| TOP CHANNEL'));
+		$this->assertSame(['name' => 'h.example – u', 'ip' => 'h.example', 'port' => '8443', 'username' => 'u', 'password' => 'p', 'legacy' => 1, 'enabled' => 1, 'ssl' => 1, 'hls' => 1],
+			ProviderImport::formData(['host' => 'h.example', 'scheme' => 'https', 'port' => 8443, 'user' => 'u', 'pass' => 'p', 'hls' => true]));
+
+		$rDb = new TestDb();
+		foreach (['streams', 'streams_servers', 'providers', 'providers_streams'] as $rTable) {
+			$rDb->exec(InstallSchema::table($rTable));
+		}
+		$rSchema = (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/source-health_*')[0] . '/database.sql');
+		foreach (array_filter(array_map('trim', explode(';', $rSchema))) as $rStatement) {
+			$rDb->exec($rStatement);
+		}
+		DatabaseFactory::set($rDb);
+		$rSaved = [$GLOBALS['db'] ?? null, $GLOBALS['rUserInfo'] ?? null, $GLOBALS['rPermissions'] ?? null];
+		$GLOBALS['db'] = $rDb;
+		$GLOBALS['rUserInfo'] = ['id' => 1, 'member_group_id' => 1];
+		$GLOBALS['rPermissions'] = ['is_admin' => 1, 'advanced' => []];
+		try {
+			$rDb->query("INSERT INTO `streams` (`id`, `type`, `stream_display_name`, `stream_source`) VALUES (5, 1, 'AL: RTSH 1 HD', ?), (6, 1, 'Sport', ?)",
+				json_encode(['http://a.example:8080/live/u1/p1/70.ts', 'http://b.example/u2/p2/9']), json_encode(['http://a.example:8080/live/u1/p1/71.ts', 'http://a.example:8080/live/u3/p3/5.m3u8']));
+			$rDb->query("INSERT INTO `providers` (`id`, `name`, `ip`, `port`, `username`, `password`, `enabled`, `status`, `data`) VALUES (1, 'B', 'http://B.example/', 80, 'u2', 'p2', 1, 1, ?)", json_encode(['streams' => 2]));
+			$rDb->query("INSERT INTO `providers_streams` (`provider_id`, `type`, `stream_id`, `stream_display_name`) VALUES (1, 'live', 8, 'RTSH 1'), (1, 'live', 12, 'Other')");
+
+			$rFound = ProviderImport::discover();
+			$this->assertCount(3, $rFound);
+			$rA = $rFound[md5('http://a.example:8080/live/u1/p1/')];
+			$this->assertSame([2, [5, 6], 8080, null], [$rA['sources'], $rA['streams'], $rA['port'], $rA['provider']]);
+			$this->assertTrue($rFound[md5('http://a.example:8080/live/u3/p3/')]['hls']);
+			$this->assertSame(1, $rFound[md5('http://b.example:/u2/p2/')]['provider']['id']);   // matched through its scheme and trailing slash
+
+			$rResult = ProviderImport::add(array_keys($rFound));
+			$this->assertSame(['added' => 2, 'existing' => 1, 'failed' => 0], $rResult);
+			$rRow = $rDb->query('SELECT `name`, `ip`, `port`, `username`, `password`, `legacy`, `enabled`, `hls` FROM `providers` WHERE `username` = ?', 'u3') ? $rDb->get_raw_row() : null;
+			$this->assertSame(['name' => 'a.example – u3', 'ip' => 'a.example', 'port' => '8080', 'username' => 'u3', 'password' => 'p3', 'legacy' => '1', 'enabled' => '1', 'hls' => '1'], array_map('strval', (array) $rRow));
+			$this->assertSame(['added' => 0, 'existing' => 3, 'failed' => 0], ProviderImport::add(array_keys(ProviderImport::discover())));
+
+			// The synced list of provider B says channel 9 is gone, and that "RTSH 1" is channel 8 now.
+			$rCheck = ProviderImport::channelCheck([['source' => 'http://b.example/u2/p2/9', 'name' => 'AL: RTSH 1 HD'], ['source' => 'http://b.example/u2/p2/12', 'name' => 'Other']]);
+			$this->assertSame(['provider' => 'B', 'listed' => false, 'suggest' => [['id' => 8, 'name' => 'RTSH 1']]], $rCheck[md5('http://b.example/u2/p2/9')]);
+			$this->assertTrue($rCheck[md5('http://b.example/u2/p2/12')]['listed']);
+			$this->assertArrayNotHasKey(md5('http://a.example:8080/live/u1/p1/70.ts'), ProviderImport::channelCheck([['source' => 'http://a.example:8080/live/u1/p1/70.ts', 'name' => 'x']])); // not synced yet: no claim
+		} finally {
+			[$GLOBALS['db'], $GLOBALS['rUserInfo'], $GLOBALS['rPermissions']] = $rSaved;
 			DatabaseFactory::reset();
 		}
 	}
