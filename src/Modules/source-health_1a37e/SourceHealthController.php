@@ -27,7 +27,7 @@ class SourceHealthController extends BaseAjaxController {
 		echo '<div class="card"><div class="card-header"><h5 class="card-title mb-0">Source Health'
 			. ($rStream !== null ? ' — ' . $h($rStream['stream_display_name']) . ' <small class="text-muted">#' . (int) $rStream['id'] . '</small>' : '') . '</h5></div><div class="card-body">'
 			. ($rStream !== null ? SourceHealthTab::render($rStream, 'edit', true) : '<p class="text-muted mb-0">No such live stream.</p>')
-			. '</div></div>';
+			. '</div></div>' . self::scrollButtons();
 		LayoutRenderer::renderFooter('admin');
 		echo '</body></html>';
 	}
@@ -47,6 +47,7 @@ class SourceHealthController extends BaseAjaxController {
 			$rBody = '<p class="text-danger mb-0">The audit could not be shown: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES) . '</p>';
 		}
 		echo '<div class="card"><div class="card-header"><h5 class="card-title mb-0">Source Audit</h5></div><div class="card-body">' . $rBody . '</div></div>';
+		echo self::scrollButtons();
 		LayoutRenderer::renderFooter('admin');
 		echo '</body></html>';
 	}
@@ -80,6 +81,15 @@ class SourceHealthController extends BaseAjaxController {
 		}
 		$rHashes = array_values(array_filter($rHashes, static fn ($h): bool => is_string($h) && preg_match('/^[0-9a-f]{32}$/', $h) === 1));
 		$this->ok(ProviderImport::add($rHashes, (bool) RequestManager::get('enabled', 1)));
+	}
+
+	/** Two floating buttons to the top and the bottom of a long page; hidden while the page is short. */
+	private static function scrollButtons(): string {
+		return '<div id="sh-scroll" style="position:fixed;right:18px;bottom:18px;z-index:1050;display:none;flex-direction:column;gap:6px">'
+			. '<button type="button" class="btn btn-sm btn-primary shadow" title="To the top" aria-label="To the top" onclick="window.scrollTo({top:0,behavior:\'smooth\'})">&#9650;</button>'
+			. '<button type="button" class="btn btn-sm btn-primary shadow" title="To the bottom" aria-label="To the bottom" onclick="window.scrollTo({top:document.documentElement.scrollHeight,behavior:\'smooth\'})">&#9660;</button>'
+			. '</div><script>(function(){var b=document.getElementById("sh-scroll");function f(){b.style.display=document.documentElement.scrollHeight>window.innerHeight*1.5?"flex":"none";}'
+			. 'window.addEventListener("resize",f);window.addEventListener("load",f);setTimeout(f,300);})();</script>';
 	}
 
 	public function probe(): never {
