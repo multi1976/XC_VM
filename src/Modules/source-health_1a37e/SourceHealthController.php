@@ -83,6 +83,53 @@ class SourceHealthController extends BaseAjaxController {
 		$this->ok(ProviderImport::add($rHashes, (bool) RequestManager::get('enabled', 1)));
 	}
 
+	/**
+	 * `api?action=source_audit_action` — delete or move to the end of their
+	 * stream sources that are off. op=preview says what would happen, op=apply
+	 * does it; both are worked out again from the streams as stored now.
+	 */
+	public function action(): never {
+		$this->requireXhr();
+		$this->gateAny([['adv', 'edit_stream']]);
+		$rAction = (string) RequestManager::get('do', '');
+		$rItems = json_decode((string) RequestManager::get('items', '[]'), true);
+		$rHost = strtolower(trim((string) RequestManager::get('host', '')));
+		if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST' || !in_array($rAction, SourceActions::ACTIONS, true) || !is_array($rItems)) {
+			$this->fail();
+		}
+		$rItems = array_values(array_filter(array_map(
+			static fn ($i): ?array => is_array($i) && isset($i[0], $i[1]) && preg_match('/^[0-9a-f]{32}$/', (string) $i[1]) === 1 ? [(int) $i[0], (string) $i[1]] : null,
+			$rItems
+		)));
+		if ($rItems === [] && $rHost === '') {
+			$this->fail(['message' => 'Nothing selected.']);
+		}
+		$rMask = static fn (array $r): array => ['name' => $r['name'], 'source' => $r['source'] !== '' ? SourceHealthTab::mask($r['source']) : '', 'why' => $r['why']];
+		if ((string) RequestManager::get('op', 'preview') === 'apply') {
+			$rResult = SourceActions::apply($rAction, $rItems, $rHost, (int) ($GLOBALS['rUserInfo']['id'] ?? 0), time());
+			$rResult['refused'] = array_map($rMask, $rResult['refused']);
+			$this->ok($rResult);
+		}
+		$rState = SourceHealthRepository::auditState();
+		[$rStreams, $rWanted] = SourceActions::select($rAction, $rItems, $rHost, $rState);
+		$rPlan = SourceActions::plan($rAction, $rStreams, $rWanted, $rState, SourceHealthRepository::onAirSources(), time());
+		$this->ok([
+			'changes' => array_map(static fn (array $c): array => ['name' => $c['name'], 'sources' => array_map(static fn (array $m): string => '#' . ($m['position'] + 1) . ' ' . SourceHealthTab::mask($m['source']), $c['moved'])], $rPlan['changes']),
+			'refused' => array_map($rMask, $rPlan['refused']),
+		]);
+	}
+
+	/** `api?action=source_audit_undo` — put a batch of changes back. */
+	public function undo(): never {
+		$this->requireXhr();
+		$this->gateAny([['adv', 'edit_stream']]);
+		$rBatch = (string) RequestManager::get('batch', '');
+		if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST' || preg_match('/^[0-9a-f]{16}$/', $rBatch) !== 1) {
+			$this->fail();
+		}
+		$this->ok(SourceActions::undo($rBatch, time()));
+	}
+
 	/** Two floating buttons to the top and the bottom of a long page; hidden while the page is short. */
 	private static function scrollButtons(): string {
 		return '<div id="sh-scroll" style="position:fixed;right:18px;bottom:18px;z-index:1050;display:none;flex-direction:column;gap:6px">'

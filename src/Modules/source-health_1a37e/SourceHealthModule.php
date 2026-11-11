@@ -25,7 +25,7 @@ class SourceHealthModule extends BaseModule {
 	}
 
 	public function getVersion(): string {
-		return '0.3.4';
+		return '0.3.5';
 	}
 
 	public function boot(ServiceContainer $container): void {
@@ -41,6 +41,8 @@ class SourceHealthModule extends BaseModule {
 		$router->api('source_health_probe', [SourceHealthController::class, 'probe']);
 		$router->api('source_audit_recheck', [SourceHealthController::class, 'recheck']);
 		$router->api('source_audit_providers', [SourceHealthController::class, 'providers']);
+		$router->api('source_audit_action', [SourceHealthController::class, 'action']);
+		$router->api('source_audit_undo', [SourceHealthController::class, 'undo']);
 		$router->get('source_audit', [SourceHealthController::class, 'audit'], ['permission' => static fn (): bool => \XcVm\Core\Auth\Authorization::check('adv', 'streams')]);
 	}
 

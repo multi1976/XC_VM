@@ -21,11 +21,15 @@ final class SourceAuditPage {
 	/** @param array<string, mixed> $rQuery the page's GET parameters (status, host) */
 	public static function render(array $rQuery, int $rNow): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
-		$rView = ($rQuery['view'] ?? '') === 'accounts' ? 'accounts' : 'sources';
+		$rView = in_array($rQuery['view'] ?? '', ['accounts', 'changes'], true) ? (string) $rQuery['view'] : 'sources';
 		$rTabs = '<ul class="nav nav-tabs mb-3"><li class="nav-item"><a class="nav-link' . ($rView === 'sources' ? ' active' : '') . '" href="./source_audit">Sources</a></li>'
-			. '<li class="nav-item"><a class="nav-link' . ($rView === 'accounts' ? ' active' : '') . '" href="./source_audit?view=accounts">Provider accounts</a></li></ul>';
+			. '<li class="nav-item"><a class="nav-link' . ($rView === 'accounts' ? ' active' : '') . '" href="./source_audit?view=accounts">Provider accounts</a></li>'
+			. '<li class="nav-item"><a class="nav-link' . ($rView === 'changes' ? ' active' : '') . '" href="./source_audit?view=changes">Changes &amp; undo</a></li></ul>';
 		if ($rView === 'accounts') {
 			return $rTabs . self::accounts($rNow);
+		}
+		if ($rView === 'changes') {
+			return $rTabs . self::changes($rNow) . self::actionScript();
 		}
 		$rState = SourceHealthRepository::auditState();
 		$rAccounts = SourceHealthRepository::accounts();
@@ -86,7 +90,7 @@ final class SourceAuditPage {
 		$rHtml = $rTabs . '<p class="text-muted small">Every source of every live stream, checked with one short HTTP request (first 2 KB, no ffmpeg): about once a day while it answers, every '
 			. intdiv(SourceAudit::FAIL_INTERVAL_SEC, 3600) . ' h while it does not, at most ' . SourceAudit::PER_HOST_PER_RUN . ' per provider every five minutes. '
 			. 'A source on air is never checked; one on a provider account a live stream is using only when the provider\'s own API says the account has a connection to spare. '
-			. 'The provider API also reports expired, banned or refused accounts. Read-only: nothing here changes a stream.</p>'
+			. 'The provider API also reports expired, banned or refused accounts. The checks change nothing; only the Move to end and Delete buttons do, after showing what they will change.</p>'
 			. '<form method="get" action="./source_audit" class="d-flex flex-wrap gap-2 mb-3" style="max-width:640px">'
 			. '<input type="hidden" name="status" value="' . $h($rWant) . '">' . ($rWantHost !== '' ? '<input type="hidden" name="host" value="' . $h($rWantHost) . '">' : '')
 			. '<input type="search" name="q" value="' . $h($rSearch) . '" class="form-control form-control-sm" style="flex:1;min-width:220px" placeholder="Search stream name, provider host or reason">'
@@ -121,7 +125,10 @@ final class SourceAuditPage {
 			}
 			$rStates = array_count_values($rAccountStates[$rHost] ?? []);
 			$rHtml .= '<td class="small">' . ($rStates === [] ? '<span class="text-muted">–</span>' : (($rStates['active'] ?? 0) > 0 ? ($rStates['active'] . ' active') : '') . (($rStates['off'] ?? 0) > 0 ? (($rStates['active'] ?? 0) > 0 ? ', ' : '') . '<span class="text-danger">' . $rStates['off'] . ' expired/refused</span>' : '')) . '</td>';
-			$rHtml .= '<td>' . ($rAllOff ? '<span class="badge bg-label-danger">every checked source off</span>' : '') . '</td></tr>';
+			$rHtml .= '<td class="text-nowrap">' . ($rAllOff ? '<span class="badge bg-label-danger">every checked source off</span> ' : '')
+				. (($rByStatus['dead'] ?? 0) + ($rByStatus['down'] ?? 0) > 0 ? '<button type="button" class="btn btn-xs btn-sm py-0 btn-outline-warning sa-act" data-do="move_end" data-host="' . $h($rHost) . '" title="Move every dead or down source of this provider to the end of its stream">Move off to end</button> ' : '')
+				. (($rByStatus['dead'] ?? 0) > 0 ? '<button type="button" class="btn btn-xs btn-sm py-0 btn-outline-danger sa-act" data-do="delete" data-host="' . $h($rHost) . '" title="Delete every dead source of this provider from its stream">Delete dead</button>' : '')
+				. '</td></tr>';
 		}
 		$rHtml .= '</tbody></table></div>';
 
@@ -133,10 +140,15 @@ final class SourceAuditPage {
 			$rHtml .= '<button type="button" class="btn btn-sm btn-outline-primary ms-auto" id="sa-requeue" data-hashes="' . $h(json_encode($rRequeue)) . '" title="Put these sources at the front of the queue: the cron checks them within the next runs, a few per provider every five minutes">Recheck all shown (' . count($rRequeue) . ')</button>';
 		}
 		$rHtml .= '</div>';
+		$rHtml .= '<div class="d-flex flex-wrap gap-2 mb-2 align-items-center"><small class="text-muted">Selected:</small>'
+			. '<button type="button" class="btn btn-sm btn-outline-warning sa-act" data-do="move_end" data-selected="1" disabled>Move to end</button>'
+			. '<button type="button" class="btn btn-sm btn-outline-danger sa-act" data-do="delete" data-selected="1" disabled>Delete</button>'
+			. '<small class="text-muted">Only dead sources can be deleted, dead or down ones moved; never the source on air, and a stream is never left without sources. Every change can be undone for '
+			. intdiv(SourceActions::UNDO_SEC, 86400) . ' days (Changes &amp; undo).</small></div>';
 		if ($rShown === []) {
 			return $rHtml . '<p class="text-muted mb-0">Nothing to show for this filter.</p>';
 		}
-		$rHtml .= '<div class="table-responsive"><table class="table table-sm"><thead><tr><th>Stream</th><th class="text-center">#</th><th>Source</th><th>State</th><th>Reason</th>'
+		$rHtml .= '<div class="table-responsive"><table class="table table-sm"><thead><tr><th><input type="checkbox" id="sa-pick-all" title="Select all shown"></th><th>Stream</th><th class="text-center">#</th><th>Source</th><th>State</th><th>Reason</th>'
 			. '<th>Off since</th><th>Last seen up</th><th>Checked</th><th></th></tr></thead><tbody>';
 		$rChannels = ProviderImport::channelCheck(array_map(static fn (array $r): array => ['source' => $r['source'], 'name' => $r['stream']['name']], array_slice($rShown, 0, self::MAX_ROWS)));
 		foreach (array_slice($rShown, 0, self::MAX_ROWS) as $r) {
@@ -145,7 +157,9 @@ final class SourceAuditPage {
 			[$rLabel, $rClass, $rTitle] = self::LABELS[$r['status']];
 			$rKind = $rAudit !== null && $rAudit['kind'] !== null ? (string) $rAudit['kind'] : null;
 			$rWhen = static fn (int $t): string => $t > 0 ? $h(date('Y-m-d H:i', $t)) . '<br><small class="text-muted">' . $h(SourceHealthTab::duration(max(0, $rNow - $t))) . ' ago</small>' : '<span class="text-muted">–</span>';
-			$rHtml .= '<tr><td><a href="./stream?id=' . (int) $r['stream']['id'] . '" target="_blank" rel="noopener">' . $h($r['stream']['name']) . '</a>'
+			$rPickable = in_array($r['status'], ['dead', 'down'], true);
+			$rHtml .= '<tr><td>' . ($rPickable ? '<input type="checkbox" class="sa-pick" data-stream="' . (int) $r['stream']['id'] . '" data-hash="' . md5($r['source']) . '" data-status="' . $h($r['status']) . '">' : '') . '</td>'
+				. '<td><a href="./stream?id=' . (int) $r['stream']['id'] . '" target="_blank" rel="noopener">' . $h($r['stream']['name']) . '</a>'
 				. ' <a class="small text-muted" href="./source_health?id=' . (int) $r['stream']['id'] . '" target="_blank" rel="noopener" title="Source Health report">↗</a></td>'
 				. '<td class="text-center">' . ((int) $r['index'] + 1) . '<small class="text-muted">/' . count($r['stream']['sources']) . '</small></td>'
 				. '<td><code class="small">' . $h(SourceHealthTab::mask($r['source'])) . '</code></td>'
@@ -163,7 +177,7 @@ final class SourceAuditPage {
 				. '<td><small>' . ($rAudit !== null && (int) $rAudit['checked_at'] > 0 ? $rWhen((int) $rAudit['checked_at']) : ($rAudit !== null ? '<span class="text-muted">queued</span>' : '<span class="text-muted">–</span>')) . '</small></td>'
 				. '<td>' . (in_array($r['status'], ['on_air', 'skip'], true) ? '' : '<button type="button" class="btn btn-sm btn-outline-secondary sa-recheck" data-hash="' . md5($r['source']) . '" data-stream="' . (int) $r['stream']['id'] . '" title="Check this source now (same rules: not if its account has no connection to spare)">Recheck</button>') . '</td></tr>';
 		}
-		$rHtml .= '</tbody></table></div>' . self::script();
+		$rHtml .= '</tbody></table></div>' . self::script() . self::actionScript();
 		if (count($rShown) > self::MAX_ROWS) {
 			$rHtml .= '<p class="text-muted small">Showing the first ' . self::MAX_ROWS . ' of ' . count($rShown) . '; filter by provider to see the rest.</p>';
 		}
@@ -234,6 +248,88 @@ final class SourceAuditPage {
 JS;
 	}
 
+	/** The Changes view: what was deleted or moved in the last UNDO_SEC, with Undo. */
+	private static function changes(int $rNow): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rRows = SourceActions::history($rNow);
+		$rHtml = '<p class="text-muted small">Sources deleted from, or moved to the end of, their streams from this page in the last ' . intdiv(SourceActions::UNDO_SEC, 86400) . ' days. '
+			. 'Undo puts them back where they were (a deleted source is not added twice if it is in the stream again). Older entries are forgotten.</p>';
+		if ($rRows === []) {
+			return $rHtml . '<p class="text-muted mb-0">No changes.</p>';
+		}
+		$rHtml .= '<div class="table-responsive"><table class="table table-sm"><thead><tr><th>When</th><th>Change</th><th class="text-center">Streams</th><th class="text-center">Sources</th><th>By</th><th></th></tr></thead><tbody>';
+		foreach ($rRows as $r) {
+			$rHtml .= '<tr><td>' . $h(date('Y-m-d H:i', $r['created_at'])) . '</td>'
+				. '<td>' . ($r['action'] === 'delete' ? '<span class="badge bg-label-danger">deleted</span>' : '<span class="badge bg-label-warning">moved to end</span>') . '</td>'
+				. '<td class="text-center">' . $r['streams'] . '</td><td class="text-center">' . $r['sources'] . '</td>'
+				. '<td><small class="text-muted">' . ($r['user_id'] !== null ? 'user #' . $r['user_id'] : '–') . '</small></td>'
+				. '<td>' . ($r['undone_at'] !== null ? '<small class="text-muted">undone ' . $h(date('Y-m-d H:i', $r['undone_at'])) . '</small>'
+					: '<button type="button" class="btn btn-sm btn-outline-secondary sa-undo" data-batch="' . $h($r['batch']) . '">Undo</button>') . '</td></tr>';
+		}
+		return $rHtml . '</tbody></table></div>';
+	}
+
+	/** Selection, preview, apply and undo: every change is shown and confirmed first. */
+	private static function actionScript(): string {
+		return <<<'JS'
+<script>
+(function () {
+	var picks = document.querySelectorAll('.sa-pick'), all = document.getElementById('sa-pick-all');
+	function picked() { return Array.prototype.filter.call(picks, function (c) { return c.checked; }); }
+	function sync() {
+		var p = picked(), dead = p.filter(function (c) { return c.dataset.status === 'dead'; }).length;
+		document.querySelectorAll('.sa-act[data-selected]').forEach(function (b) {
+			var n = b.dataset.do === 'delete' ? dead : p.length;
+			b.disabled = n === 0;
+			b.textContent = (b.dataset.do === 'delete' ? 'Delete' : 'Move to end') + (n ? ' (' + n + ')' : '');
+		});
+	}
+	picks.forEach(function (c) { c.addEventListener('change', sync); });
+	if (all) { all.addEventListener('change', function () { picks.forEach(function (c) { c.checked = all.checked; }); sync(); }); }
+	function call(params, done) {
+		jQuery.post('./api?action=source_audit_action', params, done, 'json').fail(function () { alert('The request failed.'); });
+	}
+	document.querySelectorAll('.sa-act').forEach(function (b) {
+		b.addEventListener('click', function () {
+			var verb = b.dataset.do === 'delete' ? 'Delete' : 'Move to the end';
+			var params = {do: b.dataset.do, host: b.dataset.host || '', items: '[]'};
+			if (b.dataset.selected) {
+				params.items = JSON.stringify(picked().filter(function (c) { return b.dataset.do !== 'delete' || c.dataset.status === 'dead'; }).map(function (c) { return [+c.dataset.stream, c.dataset.hash]; }));
+			}
+			call(Object.assign({op: 'preview'}, params), function (r) {
+				if (!r || !r.result) { alert((r && r.message) || 'Nothing to do.'); return; }
+				var n = 0, lines = [];
+				r.changes.forEach(function (c) { n += c.sources.length; if (lines.length < 25) { lines.push('• ' + c.name + ': ' + c.sources.join(', ')); } });
+				if (r.changes.length > 25) { lines.push('… and ' + (r.changes.length - 25) + ' more streams'); }
+				var why = {};
+				r.refused.forEach(function (x) { why[x.why] = (why[x.why] || 0) + 1; });
+				var refused = Object.keys(why).map(function (k) { return '  - ' + why[k] + '× ' + k; });
+				var NL = String.fromCharCode(10);
+				var left = refused.length ? NL + NL + 'Left alone:' + NL + refused.join(NL) : '';
+				if (n === 0) { alert('Nothing to do.' + left); return; }
+				if (!confirm(verb + ' ' + n + ' source(s) in ' + r.changes.length + ' stream(s)?' + NL + NL + lines.join(NL) + left + NL + NL + 'It can be undone for 7 days.')) { return; }
+				b.disabled = true;
+				call(Object.assign({op: 'apply'}, params), function (a) {
+					if (a && a.result) { alert(a.sources + ' source(s) in ' + a.streams + ' stream(s): done.' + (a.refused.length ? ' ' + a.refused.length + ' left alone.' : '')); location.reload(); }
+					else { alert('Failed.'); b.disabled = false; }
+				});
+			});
+		});
+	});
+	document.querySelectorAll('.sa-undo').forEach(function (b) {
+		b.addEventListener('click', function () {
+			if (!confirm('Put these sources back where they were?')) { return; }
+			b.disabled = true;
+			jQuery.post('./api?action=source_audit_undo', {batch: b.dataset.batch}, function (r) {
+				if (r && r.result) { alert(r.sources + ' source(s) in ' + r.streams + ' stream(s) put back.'); location.reload(); } else { alert('Failed.'); b.disabled = false; }
+			}, 'json').fail(function () { b.disabled = false; });
+		});
+	});
+})();
+</script>
+JS;
+	}
+
 	/** @param array{api:bool, auth:?bool, status:string, max:?int, active:?int, exp:?int, checked_at:int}|null $rAcct */
 	private static function accountNote(?array $rAcct, int $rNow): string {
 		if ($rAcct === null || !$rAcct['api']) {
@@ -257,7 +353,7 @@ JS;
 			b.disabled = true; b.textContent = 'Checking…';
 			jQuery.post('./api?action=source_audit_recheck', {hash: b.dataset.hash, stream_id: b.dataset.stream}, function (r) {
 				var msg = (r && r.message) || 'Failed';
-				var cell = b.closest('tr').querySelector('td:nth-child(5)');
+				var cell = b.closest('tr').querySelector('td:nth-child(6)');
 				if (cell) { cell.innerHTML = '<small><strong>' + (r && r.result ? 'Now: ' : 'Not checked: ') + '</strong></small>'; cell.firstChild.appendChild(document.createTextNode(msg)); }
 				b.textContent = r && r.result ? 'Done' : 'Recheck'; b.disabled = !!(r && r.result);
 			}, 'json').fail(function () { b.disabled = false; b.textContent = 'Recheck'; });
