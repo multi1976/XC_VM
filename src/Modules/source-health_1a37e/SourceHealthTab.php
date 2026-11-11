@@ -65,31 +65,57 @@ final class SourceHealthTab {
 			if ($rStats === null) {
 				continue;
 			}
+			$rBack = SourceHealthCalculator::recoveryStats($rRow['recoveries'] ?? []);
+			$rMoved = (int) ($rRow['moved_away'] ?? 0);
+			$rShortPct = (int) round(100 * $rStats['short'] / max(1, $rStats['count']));
 			$rPeak = max($rStats['buckets']) ?: 1;
 			$rBody .= '<tr><td class="text-start">' . ((int) $rRow['index'] + 1) . ' <small class="text-muted">' . $h(self::mask($rRow['source'])) . '</small></td>'
 				. '<td class="text-center">' . (int) $rStats['count'] . '</td>'
-				. '<td class="text-center"><strong>' . $h(self::duration($rStats['median'])) . '</strong></td>'
-				. '<td class="text-center"><small>' . $h(self::duration($rStats['p25']) . ' – ' . self::duration($rStats['p75'])) . '</small></td>'
+				. '<td class="text-center' . ($rShortPct >= 30 ? ' text-danger' : '') . '">' . (int) $rStats['short'] . ' <small class="text-muted">(' . $rShortPct . '%)</small></td>'
+				. '<td class="text-center"><strong>' . ($rStats['held'] > 0 ? $h(self::duration($rStats['median'])) : '–') . '</strong></td>'
+				. '<td class="text-center"><small>' . ($rStats['held'] > 0 ? $h(self::duration($rStats['p25']) . ' – ' . self::duration($rStats['p75'])) : '–') . '</small></td>'
 				. '<td class="text-center"><small>' . $h(self::duration($rStats['min']) . ' / ' . self::duration($rStats['max'])) . '</small></td>';
 			foreach ($rLabels as $rLabel) {
 				$n = (int) $rStats['buckets'][$rLabel];
 				$rBody .= '<td class="text-center' . ($n > 0 ? ($n === $rPeak ? ' bg-label-primary' : ' bg-label-secondary') : ' text-muted') . '">' . ($n > 0 ? $n : '·') . '</td>';
 			}
-			$rBody .= '<td>' . ($rStats['steady']
-				? '<span class="badge bg-label-warning" title="Half of the runs end within a narrow band around the same length: typical of a provider session or token that expires, not of a bad line.">steady ~' . $h(self::duration($rStats['median'])) . ' — likely a session/token limit</span>'
-				: '<small class="text-muted">' . ($rStats['count'] < 5 ? 'too few runs to tell' : ($rStats['median'] < 2 * SourceHealthCalculator::INCIDENT_GAP_SEC ? 'short runs: drops in bad spells' : 'spread out')) . '</small>') . '</td></tr>';
+			$rBody .= '<td class="text-center"><small>'
+				. ($rBack !== null
+					? '<span title="Of ' . (int) $rBack['count'] . ' drop(s) after which this source held again (' . intdiv(SourceHealthCalculator::HOLD_SEC, 60) . ' min or more); 3 of 4 within ' . $h(self::duration($rBack['p75'])) . ', longest ' . $h(self::duration($rBack['max'])) . '">'
+						. '<strong>' . $h(self::duration($rBack['median'])) . '</strong> · ' . (int) $rBack['attempts'] . ' tr' . ($rBack['attempts'] === 1 ? 'y' : 'ies') . '</span>'
+					: '<span class="text-muted">–</span>')
+				. ($rMoved > 0 ? '<br><span class="text-muted">' . $rMoved . '× settled on another source</span>' : '')
+				. '</small></td>';
+			$rBody .= '<td>' . self::runPattern($rStats, $rShortPct) . '</td></tr>';
 		}
 		$rHtml = '<h6 class="mt-4 mb-1">How long runs last before they drop</h6>'
-			. '<p class="text-muted small mb-2">Every run that started and failed inside the window, per source. Runs that end at about the same length again and again point to a timer on the provider\'s side '
-			. '(a session or token that expires) rather than to a bad line; that is worth knowing before switching away from an otherwise good source.</p>';
+			. '<p class="text-muted small mb-2">Every run that started and failed inside the window, per source. Runs under a minute did not hold: '
+			. 'the source dropped as soon as it was started, usually while it is coming back after a drop. The median and the spread are of the runs that held. '
+			. '<em>Back after a drop</em>: once a source that was holding drops, how long until it held again (median) and in how many attempts — '
+			. 'how long a failover should stay away from it before trying it again. Runs that end at about the same length again and again point to a timer on the provider\'s side (a session or token that expires).</p>';
 		if ($rBody === '') {
 			return $rHtml . '<p class="text-muted small mb-0">No complete runs that ended in a failure in the window.</p>';
 		}
-		$rHead = '<tr><th class="text-start">#</th><th>Runs</th><th>Median</th><th>Middle half</th><th>Shortest / longest</th>';
+		$rHead = '<tr><th class="text-start">#</th><th>Runs</th><th>Did not hold<br><small>&lt;1m</small></th><th>Median</th><th>Middle half</th><th>Shortest / longest</th>';
 		foreach ($rLabels as $rLabel) {
 			$rHead .= '<th><small>' . $h($rLabel) . '</small></th>';
 		}
-		return $rHtml . '<div class="table-responsive"><table class="table table-sm table-bordered text-center mb-2"><thead>' . $rHead . '<th>Pattern</th></tr></thead><tbody>' . $rBody . '</tbody></table></div>';
+		return $rHtml . '<div class="table-responsive"><table class="table table-sm table-bordered text-center mb-2"><thead>' . $rHead . '<th>Back after a drop</th><th>Pattern</th></tr></thead><tbody>' . $rBody . '</tbody></table></div>';
+	}
+
+	/** @param array{count:int, short:int, held:int, median:int, steady:bool} $rStats */
+	private static function runPattern(array $rStats, int $rShortPct): string {
+		if ($rStats['steady']) {
+			return '<span class="badge bg-label-warning" title="Half of the runs that held end within a narrow band around the same length: typical of a provider session or token that expires, not of a bad line.">steady ~'
+				. htmlspecialchars(self::duration($rStats['median']), ENT_QUOTES) . ' — likely a session/token limit</span>';
+		}
+		if ($rStats['held'] >= 3 && $rShortPct >= 30 && $rStats['median'] >= 2 * SourceHealthCalculator::INCIDENT_GAP_SEC) {
+			return '<span class="badge bg-label-info" title="Once up it lasts; the trouble is coming back after a drop. Give it time before retrying, and use a backup meanwhile.">holds once up — slow to come back</span>';
+		}
+		if ($rStats['count'] < 5) {
+			return '<small class="text-muted">too few runs to tell</small>';
+		}
+		return '<small class="text-muted">' . ($rStats['median'] < 2 * SourceHealthCalculator::INCIDENT_GAP_SEC ? 'short runs: drops in bad spells' : 'spread out') . '</small>';
 	}
 
 	/**
@@ -113,12 +139,25 @@ final class SourceHealthTab {
 		}
 		$rHtml .= '<div class="table-responsive"><table class="table table-sm mb-2"><thead><tr><th>#</th><th>Message</th><th class="text-center">Times</th><th>Last</th></tr></thead><tbody>';
 		foreach ($rRows as $rRow) {
+			$rGone = null;
+			foreach ($rErrors['by_source'][$rRow['index']] ?? [] as [$rMessage, , $rLast]) {
+				// The provider says the source is gone, and it has not run since.
+				if ($rGone === null && SourceHealthCalculator::reasonKind($rMessage) === 'gone' && $rLast >= (int) $rRow['last_active']) {
+					$rGone = $rMessage;
+				}
+			}
 			foreach ($rErrors['by_source'][$rRow['index']] ?? [] as $n => [$rMessage, $rCount, $rLast, $rSure]) {
 				$rLaunches = (int) ($rErrors['launches'][$rRow['index']] ?? 0);
+				$rKind = SourceHealthCalculator::reasonKind($rMessage);
 				$rHtml .= '<tr>'
 					. ($n === 0 ? '<td rowspan="' . count($rErrors['by_source'][$rRow['index']]) . '">' . ((int) $rRow['index'] + 1) . '<br><small class="text-muted">' . $h(self::mask($rRow['source']))
-						. ($rLaunches > 0 ? '<br>' . $rLaunches . ' launch(es) logged' : '') . '</small></td>' : '')
-					. '<td><code class="text-wrap">' . $h($rMessage) . '</code> <small class="text-muted" title="' . ($rSure ? 'Every line names this source\'s host' : 'Some or all of these lines name no host: placed by time') . '">' . ($rSure ? '· by host' : '· by time') . '</small></td><td class="text-center">' . (int) $rCount . '</td><td><small>' . $h(date('m-d H:i', $rLast)) . '</small></td></tr>';
+						. ($rLaunches > 0 ? '<br>' . $rLaunches . ' launch(es) logged' : '') . '</small>'
+						. ($rGone !== null ? '<br><span class="badge bg-label-danger text-wrap text-start mt-1" title="The provider\'s own answer says this will not come back by itself, and the source has not run since. Replace or remove it.">provider says it is gone — replace or remove</span>' : '')
+						. '</td>' : '')
+					. '<td><code class="text-wrap">' . $h($rMessage) . '</code>'
+					. ($rKind === 'gone' ? ' <span class="badge bg-label-danger" title="Says the channel, account or host is gone: retrying will not help">permanent</span>' : '')
+					. ($rKind === 'temporary' ? ' <span class="badge bg-label-secondary" title="A passing failure: the same source can work again">temporary</span>' : '')
+					. ' <small class="text-muted" title="' . ($rSure ? 'Every line names this source\'s host' : 'Some or all of these lines name no host: placed by time') . '">' . ($rSure ? '· by host' : '· by time') . '</small></td><td class="text-center">' . (int) $rCount . '</td><td><small>' . $h(date('m-d H:i', $rLast)) . '</small></td></tr>';
 			}
 		}
 		$rHtml .= '</tbody></table></div>';

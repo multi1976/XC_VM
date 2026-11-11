@@ -310,6 +310,48 @@ final class SourceHealthCalculatorTest extends TestCase {
 		$this->assertNull(SourceHealthCalculator::runLengths([]));
 	}
 
+	public function testRecoveryIsTheTimeUntilTheSourceHoldsAgain(): void {
+		$rEvents = [
+			self::ev(1, 'STREAM_START', self::A, 1000),
+			self::ev(1, 'STREAM_FAILED', self::A, 8200),        // held 2h, drops
+			self::ev(1, 'STREAM_START_FAIL', self::A, 8210),    // try 1: does not start
+			self::ev(1, 'STREAM_START', self::A, 8230),         // try 2: 20 s, drops
+			self::ev(1, 'STREAM_FAILED', self::A, 8250),
+			self::ev(1, 'STREAM_START', self::A, 8260),         // try 3: holds 1h
+			self::ev(1, 'STREAM_FAILED', self::A, 11860),       // drops again…
+			self::ev(1, 'STREAM_START', self::B, 11870),        // …and the stream settles on B
+			self::ev(1, 'STREAM_FAILED', self::B, 15000),
+		];
+		$rRows = self::rows($rEvents, 900, 16000);
+
+		$this->assertSame([[60, 3]], $rRows[0]['recoveries']);
+		$this->assertSame(1, $rRows[0]['moved_away']);
+		$this->assertSame(['count' => 1, 'median' => 60, 'p75' => 60, 'max' => 60, 'attempts' => 3], SourceHealthCalculator::recoveryStats($rRows[0]['recoveries']));
+		$this->assertNull(SourceHealthCalculator::recoveryStats([]));
+
+		$rStats = SourceHealthCalculator::runLengths($rRows[0]['run_lengths']);
+		$this->assertSame([3, 1, 2, 7200], [$rStats['count'], $rStats['short'], $rStats['held'], $rStats['max']]);
+		$this->assertSame(20, $rStats['min']);
+		$this->assertSame([3600, 7200], [$rStats['p25'], $rStats['p75']]); // of the runs that held
+	}
+
+	public function testACutLineIsCompletedAndReasonsAreClassified(): void {
+		$rUrl = 'http://192.142.25.110/auth/' . str_repeat('x', 400);
+		$rCut = static fn (string $rLine): string => mb_substr($rLine, 0, 500);
+		$rFull = '2026/11/11 03:02:00 [remux] source failed: Get "' . $rUrl . '": net/http: timeout awaiting response headers';
+		$rA = SourceHealthCalculator::normalizeError($rCut($rFull));
+		$rB = SourceHealthCalculator::normalizeError($rCut(str_replace('/auth/', '/auth/zz', $rFull)));
+		$this->assertSame('source failed: Get "(url)": net/http: timeout awaiting response headers', $rA);
+		$this->assertSame($rA, $rB);
+		$this->assertStringEndsWith('no such host', SourceHealthCalculator::normalizeError('lookup x: no such host'));
+
+		$this->assertSame('gone', SourceHealthCalculator::reasonKind("remux: unsupported source: (url): a web page, not a stream (XUI.one - Debug Mode: Stream ID doesn't exist.)"));
+		$this->assertSame('gone', SourceHealthCalculator::reasonKind('dial tcp: lookup pcaminf.zapto.org on (ip):#: no such host'));
+		$this->assertSame('temporary', SourceHealthCalculator::reasonKind('Get "(url)": net/http: timeout awaiting response headers'));
+		$this->assertSame('temporary', SourceHealthCalculator::reasonKind('remux: source ended'));
+		$this->assertNull(SourceHealthCalculator::reasonKind('remux: unsupported source: http 404'));
+	}
+
 	public function testALineTimeStampIsUsedAndATimeZoneOffsetTakenOut(): void {
 		$rStamp = strtotime('2026-11-10 19:00:00');
 		$this->assertSame($rStamp, SourceHealthCalculator::lineTime('2026/11/10 19:00:00 [remux] x', $rStamp + 50));

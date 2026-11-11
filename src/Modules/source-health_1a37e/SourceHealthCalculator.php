@@ -64,6 +64,8 @@ final class SourceHealthCalculator {
 		$rOpen = [];
 		/** @var array<int, int> $rLast last event time per server */
 		$rLast = [];
+		/** @var array<int, list<array{0:string, 1:int, 2:int, 3:bool, 4:bool}>> $rRuns per server: [source, since, end, ended by a failure, still live] */
+		$rRuns = [];
 
 		foreach ($rEvents as $rEvent) {
 			$rServer = (int) $rEvent['server_id'];
@@ -77,6 +79,7 @@ final class SourceHealthCalculator {
 			if (in_array($rAction, self::OPEN, true)) {
 				if ($rRun !== null) {
 					self::close($rStats, $rRun, $rTime, $rFrom, false);
+					$rRuns[$rServer][] = [$rRun['src'], $rRun['since'], $rTime, false, false];
 				}
 				$rOpen[$rServer] = ['src' => $rSrc, 'since' => $rTime];
 				if ($rInWindow && isset($rStats[$rSrc])) {
@@ -98,6 +101,7 @@ final class SourceHealthCalculator {
 					$rFailed = $rSrc !== '' ? $rSrc : ($rRun['src'] ?? '');
 					if ($rRun !== null) {
 						self::close($rStats, $rRun, $rTime, $rFrom, false);
+						$rRuns[$rServer][] = [$rRun['src'], $rRun['since'], $rTime, $rRun['src'] === $rFailed, false];
 						// How long a run lasted before it dropped — only runs seen whole
 						// (started inside the window), so a cut-off one does not read short.
 						if ($rRun['src'] === $rFailed && $rRun['since'] >= $rFrom && isset($rStats[$rFailed])) {
@@ -120,6 +124,7 @@ final class SourceHealthCalculator {
 					break;
 
 				case $rAction === 'STREAM_START_FAIL':
+					$rRuns[$rServer][] = [$rSrc, $rTime, $rTime, true, false]; // an attempt that never ran
 					if (isset($rStats[$rSrc])) {
 						$rStats[$rSrc]['start_fails']++;
 						$rStats[$rSrc]['start_fail_times'][] = $rTime;
@@ -143,6 +148,7 @@ final class SourceHealthCalculator {
 				case $rAction === 'STREAM_STOP':
 					if ($rRun !== null) {
 						self::close($rStats, $rRun, $rTime, $rFrom, false);
+						$rRuns[$rServer][] = [$rRun['src'], $rRun['since'], $rTime, false, false];
 					}
 					$rOpen[$rServer] = null;
 					break;
@@ -158,10 +164,15 @@ final class SourceHealthCalculator {
 			}
 			$rUntil = (($rRunning[$rServer] ?? null) === $rRun['src']) ? $rNow : ($rLast[$rServer] ?? $rRun['since']);
 			self::close($rStats, $rRun, $rUntil, $rFrom, false);
+			$rRuns[$rServer][] = [$rRun['src'], $rRun['since'], $rUntil, false, $rUntil === $rNow];
 			if ($rUntil === $rNow && isset($rStats[$rRun['src']])) {
 				$rStats[$rRun['src']]['running'] = true;
 				$rStats[$rRun['src']]['last_active'] = $rNow;
 			}
+		}
+
+		foreach ($rRuns as $rLine) {
+			self::recoveries($rStats, $rLine, $rFrom);
 		}
 
 		$rWindow = max(1, $rNow - $rFrom);
@@ -263,6 +274,59 @@ final class SourceHealthCalculator {
 		return array_map(static fn (array $r): int => (int) $r['index'], $rRows);
 	}
 
+	/** A run at least this long counts as the source holding again (seconds). */
+	public const HOLD_SEC = 120;
+	/** A run shorter than this did not hold: it dropped as soon as it started (seconds). */
+	public const SHORT_RUN_SEC = 60;
+
+	/**
+	 * After a source that was holding drops: how long until it holds again
+	 * (a run of HOLD_SEC or more), and how many attempts that took; or that
+	 * the stream settled on another source instead (moved_away). This is the
+	 * number a failover policy needs: how long to keep away from a source
+	 * that has just dropped before trying it again.
+	 *
+	 * @param list<array{0:string, 1:int, 2:int, 3:bool, 4:bool}> $rLine one server's runs, oldest first
+	 */
+	private static function recoveries(array &$rStats, array $rLine, int $rFrom): void {
+		usort($rLine, static fn (array $a, array $b): int => $a[1] <=> $b[1]);
+		$rOutage = null; // [source, dropped at, attempts]
+		foreach ($rLine as [$rSrc, $rSince, $rEnd, $rFailed, $rLive]) {
+			$rHeld = $rEnd - $rSince >= self::HOLD_SEC;
+			if ($rOutage !== null) {
+				if ($rHeld && $rSrc === $rOutage[0]) {
+					$rStats[$rSrc]['recoveries'][] = [$rSince - $rOutage[1], $rOutage[2] + 1];
+					$rOutage = null;
+				} elseif ($rHeld) {
+					$rStats[$rOutage[0]]['moved_away']++;
+					$rOutage = null;
+				} elseif ($rSrc === $rOutage[0]) {
+					$rOutage[2]++;
+				}
+			}
+			if ($rFailed && !$rLive && $rHeld && $rSince >= $rFrom && isset($rStats[$rSrc])) {
+				$rOutage = [$rSrc, $rEnd, 0];
+			}
+		}
+	}
+
+	/**
+	 * @param list<array{0:int, 1:int}> $rRecoveries [seconds until it held again, attempts]
+	 * @return array{count:int, median:int, p75:int, max:int, attempts:int}|null
+	 */
+	public static function recoveryStats(array $rRecoveries): ?array {
+		if ($rRecoveries === []) {
+			return null;
+		}
+		$rSec = array_column($rRecoveries, 0);
+		$rTries = array_column($rRecoveries, 1);
+		sort($rSec);
+		sort($rTries);
+		$n = count($rSec);
+		$rAt = static fn (array $a, float $q): int => (int) $a[(int) min($n - 1, max(0, round($q * ($n - 1))))];
+		return ['count' => $n, 'median' => $rAt($rSec, 0.5), 'p75' => $rAt($rSec, 0.75), 'max' => $rSec[$n - 1], 'attempts' => $rAt($rTries, 0.5)];
+	}
+
 	/** Buckets for run lengths: upper bound in seconds => label. */
 	public const RUN_BUCKETS = [60 => '<1m', 300 => '1–5m', 1800 => '5–30m', 3600 => '30m–1h', 7200 => '1–2h', 14400 => '2–4h', PHP_INT_MAX => '>4h'];
 
@@ -273,15 +337,23 @@ final class SourceHealthCalculator {
 	 * and the cure is a quick reconnect to the same source, not a switch.
 	 *
 	 * @param list<int> $rLengths seconds
-	 * @return array{count:int, min:int, median:int, max:int, p25:int, p75:int, buckets:array<string,int>, steady:bool}|null
+	 * The figures (median, middle half, steady) are taken from the runs that
+	 * held a minute or more: the ones that drop at once (`short`) are a source
+	 * failing to come back, which recoveryStats() measures, and left in they
+	 * would hide how long the source lasts once it is up.
+	 *
+	 * @return array{count:int, short:int, held:int, min:int, median:int, max:int, p25:int, p75:int, buckets:array<string,int>, steady:bool}|null
 	 */
 	public static function runLengths(array $rLengths): ?array {
 		if ($rLengths === []) {
 			return null;
 		}
 		sort($rLengths);
-		$n = count($rLengths);
-		$rAt = static fn (float $q): int => $rLengths[(int) min($n - 1, max(0, round($q * ($n - 1))))];
+		$rAll = count($rLengths);
+		$rHeld = array_values(array_filter($rLengths, static fn (int $l): bool => $l >= self::SHORT_RUN_SEC));
+		$rBase = $rHeld !== [] ? $rHeld : $rLengths;
+		$n = count($rBase);
+		$rAt = static fn (float $q): int => $rBase[(int) min($n - 1, max(0, round($q * ($n - 1))))];
 		$rBuckets = array_fill_keys(array_values(self::RUN_BUCKETS), 0);
 		foreach ($rLengths as $rLength) {
 			foreach (self::RUN_BUCKETS as $rUpper => $rLabel) {
@@ -295,8 +367,8 @@ final class SourceHealthCalculator {
 		// Steady: at least 5 runs, the middle half within ±10% of the median, and
 		// at least 30 min long. Shorter runs that repeat are a source dropping
 		// over and over through one bad spell (an incident), not a timer.
-		$rSteady = $n >= 5 && $rMedian >= 2 * self::INCIDENT_GAP_SEC && ($rAt(0.75) - $rAt(0.25)) <= 0.2 * $rMedian;
-		return ['count' => $n, 'min' => $rLengths[0], 'median' => $rMedian, 'max' => $rLengths[$n - 1], 'p25' => $rAt(0.25), 'p75' => $rAt(0.75), 'buckets' => $rBuckets, 'steady' => $rSteady];
+		$rSteady = count($rHeld) >= 5 && $rMedian >= 2 * self::INCIDENT_GAP_SEC && ($rAt(0.75) - $rAt(0.25)) <= 0.2 * $rMedian;
+		return ['count' => $rAll, 'short' => $rAll - count($rHeld), 'held' => count($rHeld), 'min' => $rLengths[0], 'median' => $rMedian, 'max' => $rLengths[$rAll - 1], 'p25' => $rAt(0.25), 'p75' => $rAt(0.75), 'buckets' => $rBuckets, 'steady' => $rSteady];
 	}
 
 	/**
@@ -495,8 +567,57 @@ final class SourceHealthCalculator {
 	}
 
 	/** One error line as a message to group by: no URLs, addresses or changing numbers. */
+	/**
+	 * The panel keeps an error line in a varchar(500): a long redirect URL in
+	 * it pushes the message past the end and the line is cut mid-word, at a
+	 * different place each time ("timeout aw", "timeou"). A cut tail that is the
+	 * start of one of these is completed, so the copies group together.
+	 */
+	private const KNOWN_TAILS = [
+		'net/http: timeout awaiting response headers', 'net/http: request canceled while waiting for connection',
+		'use of closed network connection', 'connection reset by peer', 'connection refused', 'i/o timeout',
+		'no such host', 'context deadline exceeded', 'unexpected EOF', 'a web page, not a stream',
+		'not an mpegts stream or a playlist', 'empty body', 'source ended',
+	];
+	/** Length at which streams_errors.error cuts a line. */
+	private const ERROR_COLUMN = 500;
+
+	/** What a message says about the source: 'gone' (will not come back by itself), 'temporary', or null. */
+	public static function reasonKind(string $rMessage): ?string {
+		if (preg_match("~doesn't exist|does not exist|not exist|no such host|expired|banned|blocked|disabled|suspended|not allowed|invalid (user|login|credentials|account)|unauthori[sz]ed|forbidden|http 40[13]\b|not in (your |the )?bouquet~i", $rMessage)) {
+			return 'gone';
+		}
+		if (preg_match('~max(imum)? connections|connection limit|offline|not available|unavailable|try again|timeout|refused|reset by peer|source ended|source idle|empty body|http 5\d\d\b|closed network connection~i', $rMessage)) {
+			return 'temporary';
+		}
+		return null;
+	}
+
+	private static function completeCut(string $rLine): string {
+		foreach (self::KNOWN_TAILS as $rTail) {
+			if (str_ends_with($rLine, $rTail)) {
+				return $rLine; // ends on a whole message: not cut after all
+			}
+		}
+		$rBest = null;
+		$rBestLen = 0;
+		foreach (self::KNOWN_TAILS as $rTail) {
+			for ($l = strlen($rTail) - 1; $l >= 4 && $l > $rBestLen; $l--) {
+				if (str_ends_with($rLine, substr($rTail, 0, $l))) {
+					[$rBest, $rBestLen] = [$rTail, $l];
+					break;
+				}
+			}
+		}
+		return $rBest === null ? $rLine . ' …' : substr($rLine, 0, -$rBestLen) . $rBest;
+	}
+
 	public static function normalizeError(string $rLine): string {
-		$rLine = self::stripLogPrefix(str_replace(['&lt;', '&gt;'], ['<', '>'], $rLine));
+		$rLine = str_replace(['&lt;', '&gt;'], ['<', '>'], $rLine);
+		if (mb_strlen($rLine) >= self::ERROR_COLUMN - 2) {
+			$rLine = self::completeCut(rtrim($rLine));
+		}
+		$rLine = self::stripLogPrefix($rLine);
 		$rLine = (string) preg_replace('~[a-z]+://[^\s"\']+~i', '(url)', $rLine);
 		$rLine = (string) preg_replace('~\[[\w-]+ @ 0x[0-9a-f]+\]\s*~i', '', $rLine);
 		$rLine = (string) preg_replace('~0x[0-9a-f]+~i', '', $rLine);
@@ -513,7 +634,7 @@ final class SourceHealthCalculator {
 	private static function blank(int $rIndex, string $rSource): array {
 		return [
 			'index' => $rIndex, 'source' => $rSource,
-			'starts' => 0, 'start_fails' => 0, 'failures' => 0, 'incidents' => 0, 'incident_times' => [], 'start_fail_times' => [], 'run_lengths' => [], 'last_drop' => 0,
+			'starts' => 0, 'start_fails' => 0, 'failures' => 0, 'incidents' => 0, 'incident_times' => [], 'start_fail_times' => [], 'run_lengths' => [], 'recoveries' => [], 'moved_away' => 0, 'last_drop' => 0,
 			'quality_issues' => 0, 'switched_away' => 0,
 			'uptime_sec' => 0, 'last_active' => 0, 'last_failure' => 0,
 			'running' => false, 'score' => null, 'confidence' => 'none',

@@ -130,6 +130,30 @@ final class SourceHealthProbeTest extends TestCase {
 		$this->assertSame([], $rDirect);
 	}
 
+	public function testAnErrorPageSaysWhy(): void {
+		$rPage = '<html><head><title>XUI.one - Debug Mode</title><style>' . str_repeat('#notfound{position:absolute}', 50) . '</style></head>'
+			. '<body><h1>Stream ID doesn&#39;t exist.</h1><p>http://host/live/user/pass/70.ts</p></body></html>';
+		$this->assertSame("XUI.one - Debug Mode: Stream ID doesn't exist. (url)", SourceProber::pageReason($rPage));
+
+		$rDir = sys_get_temp_dir() . '/sh-page-' . getmypid();
+		@mkdir($rDir);
+		$rPort = 20000 + getmypid() % 1000;
+		file_put_contents($rDir . '/page.html', $rPage);
+		file_put_contents($rDir . '/router.php', '<?php if (str_starts_with($_SERVER["REQUEST_URI"], "/live/")) { header("Location: /page.html", true, 302); return true; } return false;');
+		$rServer = proc_open(['php', '-S', '127.0.0.1:' . $rPort, '-t', $rDir, $rDir . '/router.php'], [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $rPipes);
+		usleep(400000);
+		try {
+			$rTrace = SourceProber::trace('http://127.0.0.1:' . $rPort . '/live/u/p/70.ts', []);
+		} finally {
+			proc_terminate($rServer);
+			proc_close($rServer);
+			array_map('unlink', glob($rDir . '/*'));
+			@rmdir($rDir);
+		}
+		$this->assertSame([], $rTrace['hosts']); // same host: not a redirect host
+		$this->assertSame("XUI.one - Debug Mode: Stream ID doesn't exist. (url)", $rTrace['page']);
+	}
+
 	public function testProbesAreStoredAggregatedAndSwitchedPerStream(): void {
 		$rDb = new TestDb();
 		foreach (['streams', 'streams_servers'] as $rTable) {

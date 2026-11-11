@@ -135,7 +135,12 @@ final class SourceProber {
 	public static function probe(string $rUrl, array $rFetch, string $rProbe, string $rFfmpeg): array {
 		$rResult = self::probeStream($rUrl, $rFetch, $rProbe, $rFfmpeg);
 		if (preg_match('~^https?://~i', $rUrl)) {
-			$rResult['redirect_hosts'] = self::redirectHosts($rUrl, $rFetch);
+			$rTrace = self::trace($rUrl, $rFetch);
+			$rResult['redirect_hosts'] = $rTrace['hosts'];
+			if (!$rResult['ok'] && $rTrace['page'] !== null) {
+				// ffprobe only says it could not open: the page says why.
+				$rResult['error'] = 'a web page, not a stream' . ($rTrace['page'] !== '' ? ' (' . $rTrace['page'] . ')' : '');
+			}
 		}
 		return $rResult;
 	}
@@ -150,23 +155,45 @@ final class SourceProber {
 	 * @return list<string>
 	 */
 	public static function redirectHosts(string $rUrl, array $rFetch, int $rMaxHops = 3): array {
+		return self::trace($rUrl, $rFetch, $rMaxHops)['hosts'];
+	}
+
+	/**
+	 * Follow a source's redirects (headers only) and, when the last answer is
+	 * a web page rather than media, read its first 8 KB for what it says.
+	 *
+	 * @return array{hosts: list<string>, page: ?string} page: null when not a web page
+	 */
+	public static function trace(string $rUrl, array $rFetch, int $rMaxHops = 3): array {
 		$rHosts = [];
+		$rPage = null;
 		$rOrigin = strtolower((string) parse_url($rUrl, PHP_URL_HOST));
 		for ($i = 0; $i < $rMaxHops && function_exists('curl_init'); $i++) {
 			$rLocation = null;
+			$rType = '';
+			$rBody = '';
 			$ch = curl_init($rUrl);
 			curl_setopt_array($ch, [
 				CURLOPT_FOLLOWLOCATION => false,
 				CURLOPT_CONNECTTIMEOUT => 5,
 				CURLOPT_TIMEOUT        => 8,
 				CURLOPT_USERAGENT      => (string) ($rFetch['user_agent'] ?? 'Mozilla/5.0'),
-				CURLOPT_HEADERFUNCTION => static function ($ch, string $rLine) use (&$rLocation): int {
+				CURLOPT_HEADERFUNCTION => static function ($ch, string $rLine) use (&$rLocation, &$rType): int {
 					if (stripos($rLine, 'Location:') === 0) {
 						$rLocation = trim(substr($rLine, 9));
+					} elseif (stripos($rLine, 'Content-Type:') === 0) {
+						$rType = strtolower(trim(substr($rLine, 13)));
 					}
 					return strlen($rLine);
 				},
-				CURLOPT_WRITEFUNCTION  => static fn ($ch, string $rData): int => 0, // stop at the body
+				// Media: stop at the first byte. A page: keep up to 8 KB of it.
+				CURLOPT_WRITEFUNCTION  => static function ($ch, string $rData) use (&$rBody, &$rType): int {
+					if ($rBody === '' && !str_starts_with($rType, 'text/') && substr(ltrim($rData, "\xef\xbb\xbf \t\r\n"), 0, 1) !== '<') {
+						return 0;
+					}
+					$rBody .= $rData;
+					return strlen($rBody) < 8192 ? strlen($rData) : 0;
+				},
 			]);
 			if (!empty($rFetch['http_proxy'])) {
 				curl_setopt($ch, CURLOPT_PROXY, (string) $rFetch['http_proxy']);
@@ -178,6 +205,9 @@ final class SourceProber {
 			$rCode = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
 			curl_close($ch);
 			if ($rLocation === null || $rCode < 300 || $rCode >= 400) {
+				if ($rBody !== '' && $rCode > 0) {
+					$rPage = self::pageReason($rBody);
+				}
 				break;
 			}
 			$rNext = self::resolve($rUrl, $rLocation);
@@ -190,7 +220,35 @@ final class SourceProber {
 			}
 			$rUrl = $rNext;
 		}
-		return $rHosts;
+		return ['hosts' => $rHosts, 'page' => $rPage];
+	}
+
+	/**
+	 * The text a web page shows, as one short line: an XUI.one page in debug
+	 * mode says "Stream ID doesn't exist.", others "Max connections reached".
+	 * Style sheets and scripts are dropped, and so are URLs, so a page that
+	 * echoes the request cannot put the account into the report.
+	 */
+	public static function pageReason(string $rHtml): string {
+		$rTitle = '';
+		if (preg_match('~<title\b[^>]*>(.*?)</title\s*>~is', $rHtml, $m)) {
+			$rTitle = self::pageText($m[1]);
+			$rHtml = str_replace($m[0], ' ', $rHtml);
+		}
+		$rText = self::pageText((string) preg_replace('~<(style|script|noscript)\b.*?</\1\s*>~is', ' ', $rHtml));
+		if ($rTitle !== '' && $rText !== '' && !str_starts_with($rText, $rTitle)) {
+			$rText = $rTitle . ': ' . $rText;
+		} elseif ($rText === '') {
+			$rText = $rTitle;
+		}
+		return mb_strlen($rText) > 160 ? mb_substr($rText, 0, 160) . '…' : $rText;
+	}
+
+	private static function pageText(string $rHtml): string {
+		$rText = html_entity_decode((string) preg_replace('~<[^>]*>~s', ' ', $rHtml), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+		$rText = (string) preg_replace('~[a-z][a-z0-9+.-]*://\S+~i', '(url)', $rText);
+		$rText = (string) preg_replace('~[\x00-\x1f\x7f]~', ' ', $rText);
+		return trim((string) preg_replace('~\s+~u', ' ', $rText));
 	}
 
 	/** A Location header made absolute against the URL that sent it. */
