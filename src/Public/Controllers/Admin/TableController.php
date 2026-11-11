@@ -4804,28 +4804,44 @@ class TableController extends BaseAdminController {
 		if (!Authorization::check("adv", "streams") && !Authorization::check("adv", "add_stream") && !Authorization::check("adv", "edit_stream") && !Authorization::check("adv", "add_movie") && !Authorization::check("adv", "edit_movie")) {
 			exit;
 		}
-		$rOrder = ["`providers`.`name`", "`providers_streams`.`stream_icon`", "`providers_streams`.`stream_display_name`", false];
-		if (RequestManager::has("order") && (string) (RequestManager::get("order")[0]["column"] ?? '') !== '') {
-			$rOrderRow = (int) (RequestManager::get("order")[0]["column"] ?? 0);
-		} else {
-			$rOrderRow = 0;
-		}
+		// Sort by what a column shows, whichever form lays the columns out:
+		// the stream form has an icon column first, the movie form does not.
+		$rSortable = ["name" => "`providers_streams`.`stream_display_name`", "provider_name" => "`providers`.`name`"];
 		$rWhere = $rWhereV = [];
 		$rWhere[] = "`providers`.`enabled` = 1 AND `providers`.`status` = 1";
-		if ((string) (RequestManager::get("search")["value"] ?? '') !== '') {
-			foreach (range(1, 4) as $rInt) {
-				$rWhereV[] = "%" . RequestManager::get("search")["value"] . "%";
+		$rSearch = trim((string) (RequestManager::get("search")["value"] ?? ''));
+		$rWords = self::providerSearchWords($rSearch);
+		if ($rSearch !== '') {
+			// A channel name matches when it holds every word of the searched one,
+			// quality tags and country prefixes aside: "RTSH 1 HD" finds
+			// "AL| RTSH 1 FHD". The provider's name, host or a channel id match whole.
+			$rNameMatch = $rWords !== [] ? '(' . implode(' AND ', array_fill(0, count($rWords), '`providers_streams`.`stream_display_name` LIKE ?')) . ')' : '0';
+			$rWhere[] = "(" . $rNameMatch . " OR `providers`.`name` LIKE ? OR `providers`.`ip` LIKE ? OR `providers_streams`.`stream_id` = ?)";
+			foreach ($rWords as $rWord) {
+				$rWhereV[] = '%' . addcslashes($rWord, '%_\\') . '%';
 			}
-			$rWhere[] = "(`providers`.`name` LIKE ? OR `providers`.`ip` LIKE ? OR `providers_streams`.`stream_display_name` LIKE ? OR `providers_streams`.`stream_id` LIKE ?)";
+			$rWhereV[] = '%' . $rSearch . '%';
+			$rWhereV[] = '%' . $rSearch . '%';
+			$rWhereV[] = ctype_digit($rSearch) ? (int) $rSearch : -1;
 		}
 		if ((string) (RequestManager::get("type") ?? '') !== '') {
 			$rWhere[] = "`providers_streams`.`type` = ?";
 			$rWhereV[] = RequestManager::get("type");
 		}
 		$rOrderBy = "";
-		if (isset($rOrder[$rOrderRow]) && $rOrder[$rOrderRow]) {
-			$rOrderDirection = strtolower(RequestManager::get("order")[0]["dir"] ?? "") === "desc" ? "desc" : "asc";
-			$rOrderBy = "ORDER BY " . $rOrder[$rOrderRow] . " " . $rOrderDirection;
+		$rOrderV = [];
+		$rOrderReq = RequestManager::get("order")[0] ?? null;
+		$rColumn = is_array($rOrderReq) ? (string) (RequestManager::get("columns")[(int) ($rOrderReq["column"] ?? -1)]["data"] ?? '') : '';
+		if (isset($rSortable[$rColumn])) {
+			$rOrderDirection = strtolower((string) ($rOrderReq["dir"] ?? "")) === "desc" ? "desc" : "asc";
+			$rOrderBy = "ORDER BY " . $rSortable[$rColumn] . " " . $rOrderDirection;
+		} elseif ($rWords !== []) {
+			// Closest first: the searched words as whole words in that order
+			// ("RTSH 1" before "RTSH 12"), then the shortest name.
+			$rOrderBy = "ORDER BY (`providers_streams`.`stream_display_name` REGEXP ?) DESC, CHAR_LENGTH(`providers_streams`.`stream_display_name`) ASC, `providers`.`name` ASC";
+			$rOrderV[] = '(^|[^[:alnum:]])' . implode('[^[:alnum:]]+', array_map(static fn (string $w): string => preg_quote($w, '/'), $rWords)) . '([^[:alnum:]]|$)';
+		} else {
+			$rOrderBy = "ORDER BY `providers_streams`.`stream_display_name` ASC";
 		}
 		if (0 < count($rWhere)) {
 			$rWhereString = "WHERE " . implode(" AND ", $rWhere);
@@ -4842,7 +4858,7 @@ class TableController extends BaseAdminController {
 		$rReturn["recordsFiltered"] = ($rIsAPI ? ($rReturn["recordsTotal"] < $rLimit ? $rReturn["recordsTotal"] : $rLimit) : $rReturn["recordsTotal"]);
 		if (0 < $rReturn["recordsTotal"]) {
 			$rQuery = "SELECT `providers`.`id`,`providers_streams`.`type`,`providers`.`username`, `providers`.`password`, `providers`.`ssl`, `providers`.`legacy`, `providers`.`hls`, `providers`.`ip`, `providers`.`port`, `providers`.`name`, `providers`.`data`, `providers_streams`.`stream_id`, `providers_streams`.`category_array`, `providers_streams`.`stream_display_name`, `providers_streams`.`stream_icon`,`providers_streams`.`channel_id` FROM `providers_streams` LEFT JOIN `providers` ON `providers`.`id` = `providers_streams`.`provider_id` " . $rWhereString . " " . $rOrderBy . " LIMIT " . $rStart . ", " . $rLimit . ";";
-			$db->query($rQuery, ...$rWhereV);
+			$db->query($rQuery, ...$rWhereV, ...$rOrderV);
 			if (0 < $db->num_rows()) {
 				foreach ($db->get_rows() as $rRow) {
 					if ($rIsAPI) {
@@ -4857,14 +4873,19 @@ class TableController extends BaseAdminController {
 							$rStreamURL = ($rRow["ssl"] ? "https" : "http") . "://" . $rRow["ip"] . ":" . $rRow["port"] . "/movie/" . $rRow["username"] . "/" . $rRow["password"] . "/" . $rRow["stream_id"] . "." . $rRow["channel_id"];
 						}
 						$rProviderData = json_decode((string) $rRow["data"], true) ?: [];
+						$rExpires = $rProviderData["exp_date"] ?? null;
+						$rCategories = array_values(array_filter(array_map('strval', (array) (json_decode((string) $rRow["category_array"], true) ?: []))));
 						$rReturn["data"][] = [
 							"id" => (int) $rRow["id"],
 							"type" => (string) $rRow["type"],
 							"name" => (string) $rRow["stream_display_name"],
 							"stream_icon" => ($rRow["type"] == "live") ? (string) $rRow["stream_icon"] : "",
 							"stream_url" => $rStreamURL,
+							"provider_stream_id" => (int) $rRow["stream_id"],
+							"category" => implode(', ', array_slice($rCategories, 0, 2)),
 							"provider_name" => (string) $rRow["name"],
-							"provider_expires" => ($rProviderData["exp_date"] ?? null) ? (string) $rProviderData["exp_date"] : "Never",
+							"provider_expires" => $rExpires ? (string) $rExpires : "Never",
+							"provider_expires_date" => is_numeric($rExpires) && (int) $rExpires > 0 ? date('Y-m-d', (int) $rExpires) : '',
 							"provider_max" => ($rProviderData["max_connections"] ?? null) ? (string) $rProviderData["max_connections"] : "\u{221E}",
 							"provider_active" => (string) ($rProviderData["active_connections"] ?? ""),
 						];
@@ -4874,6 +4895,21 @@ class TableController extends BaseAdminController {
 		}
 		echo json_encode($rReturn);
 		exit;
+	}
+
+	/**
+	 * The words a provider channel name must hold to match a searched one:
+	 * lower case, quality tags (HD, FHD, 4K, HEVC…) and a leading country
+	 * prefix ("AL:", "|AL|", "[UK]") left out.
+	 *
+	 * @return list<string>
+	 */
+	public static function providerSearchWords(string $rSearch): array {
+		$rName = mb_strtolower(trim($rSearch));
+		$rName = (string) preg_replace('/^\s*(?:[\[|(]\s*[\p{L}]{2,3}\s*[\]|)]|[\p{L}]{2,3}\s*[:|]|[\p{L}]{2}\s+-)\s*/u', '', $rName);
+		$rName = (string) preg_replace('/\b(?:uhd|fhd|hd|sd|4k|8k|hevc|h\.?265|h\.?264|1080[pi]?|720p|50fps|60fps|raw|backup)\b/u', ' ', $rName);
+		$rWords = preg_split('/[^\p{L}\p{N}+]+/u', $rName, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+		return array_values(array_unique(array_slice($rWords, 0, 6)));
 	}
 
 	private function handleParentServers($rReturn, $rStart, $rLimit, $rIsAPI) {

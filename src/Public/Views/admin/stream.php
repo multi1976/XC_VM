@@ -463,14 +463,15 @@ $rTitle = $rIsEdit ? $rStream['stream_display_name'] : ($rIsImport ? 'Import Str
 
 <!-- Provider search modal -->
 <div class="modal fade" id="providerModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title mb-0"><?= $language::get('provider_streams'); ?></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
+                <p class="text-muted small mb-2"><?= $language::get('provider_streams_help'); ?></p>
                 <div class="card-datatable table-responsive">
-                    <table id="datatable-provider-streams" class="table">
+                    <table id="datatable-provider-streams" class="table table-hover align-middle">
                         <thead>
                             <tr>
                                 <th class="text-center"><?= $language::get('icon'); ?></th>
@@ -828,7 +829,7 @@ LayoutRenderer::renderFooter('admin');
                 }
             });
         }
-        window.addStream = function(url) {
+        window.addStream = function(url, keepOpen) {
             var rows = list.querySelectorAll('.source-row'),
                 last = rows[rows.length - 1];
             if (last.querySelector('.src-input').value.length > 0) {
@@ -840,7 +841,7 @@ LayoutRenderer::renderFooter('admin');
             }
             if (url) {
                 last.querySelector('.src-input').value = url;
-                var m = bootstrap.Modal.getInstance(document.getElementById('providerModal'));
+                var m = keepOpen ? null : bootstrap.Modal.getInstance(document.getElementById('providerModal'));
                 if (m) {
                     m.hide();
                 }
@@ -960,23 +961,39 @@ LayoutRenderer::renderFooter('admin');
                 return esc(s).replace(/"/g, '&quot;');
             }
             function providerIcon(url) {
-                return url ? '<img loading="lazy" src="' + escAttr(url) + '" height="32px">' : '';
+                return url ? '<img loading="lazy" src="' + escAttr(url) + '" alt="" style="max-height:36px;max-width:64px;object-fit:contain" onerror="this.remove()">' : '<i class="icon-base ti tabler-photo-off text-muted"></i>';
             }
+            // The provider, its connections in use / allowed and its expiry, shown (not in a tooltip).
             function providerCell(row) {
-                var title = 'Expires: ' + escAttr(row.provider_expires) + '<br/>Connections: ' + escAttr(row.provider_active) + ' / ' + escAttr(row.provider_max);
-                return '<span class="tooltip" title="' + title + '">' + esc(row.provider_name) + '</span>';
+                var active = parseInt(row.provider_active, 10), max = parseInt(row.provider_max, 10);
+                var full = !isNaN(active) && !isNaN(max) && max > 0 && active >= max;
+                return '<div class="fw-medium text-body">' + esc(row.provider_name) + '</div>' +
+                    '<div class="d-flex flex-wrap gap-1 mt-1">' +
+                    '<span class="badge ' + (full ? 'bg-label-danger' : 'bg-label-secondary') + '" title="' + escAttr(<?= json_encode($language::get('connections')); ?>) + '"><i class="icon-base ti tabler-plug-connected icon-14px me-1"></i>' + esc(row.provider_active || '0') + ' / ' + esc(row.provider_max) + '</span>' +
+                    (row.provider_expires_date ? '<span class="badge bg-label-secondary" title="' + escAttr(<?= json_encode($language::get('expires')); ?>) + '"><i class="icon-base ti tabler-calendar icon-14px me-1"></i>' + esc(row.provider_expires_date) + '</span>' : '') +
+                    '</div>';
+            }
+            function providerNameCell(row) {
+                return '<div class="fw-medium text-body">' + esc(row.name) + '</div>' +
+                    '<small class="text-muted">' + (row.category ? esc(row.category) + ' · ' : '') + 'ID ' + esc(String(row.provider_stream_id || '')) + '</small>';
+            }
+            function sourceListed(url) {
+                return Array.prototype.some.call(document.querySelectorAll('.src-input'), function(i) { return i.value.trim() === url; });
             }
             function providerAddButton(row) {
-                return '<button type="button" class="btn btn-light waves-effect waves-light btn-xs prov-add" data-name="' + escAttr(row.name) + '" data-url="' + escAttr(row.stream_url) + '"><i class="mdi mdi-check"></i></button> ' +
-                    '<button type="button" class="btn btn-sm btn-label-info text-wrap prov-check" data-url="' + escAttr(row.stream_url) + '">' + esc(<?= json_encode($language::get('scan_source')); ?>) + '</button>';
+                var added = sourceListed(row.stream_url);
+                return '<div class="d-flex flex-wrap justify-content-center gap-1">' +
+                    '<button type="button" class="btn btn-sm ' + (added ? 'btn-label-success' : 'btn-primary') + ' prov-add" data-name="' + escAttr(row.name) + '" data-url="' + escAttr(row.stream_url) + '"' + (added ? ' disabled' : '') + '>' +
+                    '<i class="icon-base ti ' + (added ? 'tabler-check' : 'tabler-plus') + ' icon-14px me-1"></i>' + esc(added ? <?= json_encode($language::get('added') ?: 'Added'); ?> : <?= json_encode($language::get('add') ?: 'Add'); ?>) + '</button>' +
+                    '<button type="button" class="btn btn-sm btn-label-secondary text-wrap prov-check" data-url="' + escAttr(row.stream_url) + '">' + esc(<?= json_encode($language::get('scan_source')); ?>) + '</button>' +
+                    '</div>';
             }
             var provTable = $('#datatable-provider-streams').DataTable({
                 serverSide: true,
                 searchDelay: 250,
                 responsive: false,
-                order: [
-                    [0, 'asc']
-                ],
+                // No column order by default: the server puts the closest names first.
+                order: [],
                 pageLength: <?= (int) ($rSettings['default_entries'] ?? 10) ?: 10; ?>,
                 ajax: {
                     url: './table',
@@ -987,19 +1004,20 @@ LayoutRenderer::renderFooter('admin');
                 },
                 columns: [{
                     data: 'stream_icon',
-                    className: 'dt-center',
+                    className: 'dt-center align-middle',
                     orderable: false,
                     render: function(d) {
                         return providerIcon(d);
                     }
                 }, {
                     data: 'name',
-                    render: function(d) {
-                        return esc(d);
+                    className: 'align-middle',
+                    render: function(d, t, row) {
+                        return providerNameCell(row);
                     }
                 }, {
-                    data: null,
-                    orderable: false,
+                    data: 'provider_name',
+                    className: 'align-middle',
                     render: function(d, t, row) {
                         return providerCell(row);
                     }
@@ -1043,11 +1061,16 @@ LayoutRenderer::renderFooter('admin');
                 providerProbeSequence++;
                 if (providerProbeRequest) { providerProbeRequest.abort(); providerProbeRequest = null; }
             });
+            // Add as one more source and stay in the list, so several can be added.
             $('#datatable-provider-streams tbody').on('click', '.prov-add', function() {
-                addStream(this.dataset.url);
+                addStream(this.dataset.url, true);
+                this.disabled = true;
+                this.classList.remove('btn-primary');
+                this.classList.add('btn-label-success');
+                this.innerHTML = '<i class="icon-base ti tabler-check icon-14px me-1"></i>' + esc(<?= json_encode($language::get('added') ?: 'Added'); ?>);
             });
             provBtn.addEventListener('click', function() {
-                provTable.search(document.getElementById('stream_display_name') ? document.getElementById('stream_display_name').value : '').draw();
+                provTable.order([]).search(document.getElementById('stream_display_name') ? document.getElementById('stream_display_name').value : '').draw();
                 bootstrap.Modal.getOrCreateInstance(document.getElementById('providerModal')).show();
             });
         }

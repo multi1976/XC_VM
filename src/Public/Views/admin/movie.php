@@ -613,20 +613,25 @@ LayoutRenderer::renderFooter('admin');
             function escAttr(s) {
                 return esc(s).replace(/"/g, '&quot;');
             }
+            // The provider, its connections in use / allowed and its expiry, shown (not in a tooltip).
             function providerCell(row) {
-                var title = 'Expires: ' + escAttr(row.provider_expires) + '<br/>Connections: ' + escAttr(row.provider_active) + ' / ' + escAttr(row.provider_max);
-                return '<span class="tooltip" title="' + title + '">' + esc(row.provider_name) + '</span>';
+                var active = parseInt(row.provider_active, 10), max = parseInt(row.provider_max, 10);
+                var full = !isNaN(active) && !isNaN(max) && max > 0 && active >= max;
+                return '<div class="fw-medium text-body">' + esc(row.provider_name) + '</div>' +
+                    '<div class="d-flex flex-wrap gap-1 mt-1">' +
+                    '<span class="badge ' + (full ? 'bg-label-danger' : 'bg-label-secondary') + '"><i class="icon-base ti tabler-plug-connected icon-14px me-1"></i>' + esc(row.provider_active || '0') + ' / ' + esc(row.provider_max) + '</span>' +
+                    (row.provider_expires_date ? '<span class="badge bg-label-secondary"><i class="icon-base ti tabler-calendar icon-14px me-1"></i>' + esc(row.provider_expires_date) + '</span>' : '') +
+                    '</div>';
             }
             function providerAddButton(row) {
-                return '<button type="button" class="btn btn-light waves-effect waves-light btn-xs prov-add" data-name="' + escAttr(row.name) + '" data-url="' + escAttr(row.stream_url) + '"><i class="mdi mdi-check"></i></button>';
+                return '<button type="button" class="btn btn-sm btn-primary prov-add" data-name="' + escAttr(row.name) + '" data-url="' + escAttr(row.stream_url) + '"><i class="icon-base ti tabler-plus icon-14px me-1"></i>' + esc(<?= json_encode($language::get('add') ?: 'Add'); ?>) + '</button>';
             }
             var provTable = $('#datatable-provider-movies').DataTable({
                 serverSide: true,
                 searchDelay: 250,
                 responsive: false,
-                order: [
-                    [0, 'asc']
-                ],
+                // No column order by default: the server puts the closest names first.
+                order: [],
                 pageLength: <?= (int) ($rSettings['default_entries'] ?? 10) ?: 10; ?>,
                 ajax: {
                     url: './table',
@@ -637,12 +642,13 @@ LayoutRenderer::renderFooter('admin');
                 },
                 columns: [{
                     data: 'name',
-                    render: function(d) {
-                        return esc(d);
+                    className: 'align-middle',
+                    render: function(d, t, row) {
+                        return '<div class="fw-medium text-body">' + esc(d) + '</div>' + (row.category ? '<small class="text-muted">' + esc(row.category) + '</small>' : '');
                     }
                 }, {
-                    data: null,
-                    orderable: false,
+                    data: 'provider_name',
+                    className: 'align-middle',
                     render: function(d, t, row) {
                         return providerCell(row);
                     }
@@ -659,7 +665,7 @@ LayoutRenderer::renderFooter('admin');
                 addStream(this.dataset.name, this.dataset.url);
             });
             provBtn.addEventListener('click', function() {
-                provTable.search(document.getElementById('stream_display_name').value).draw();
+                provTable.order([]).search(document.getElementById('stream_display_name').value).draw();
                 bootstrap.Modal.getOrCreateInstance(document.getElementById('providerModal')).show();
             });
             // The provider rows render a button that calls this global (legacy contract).
