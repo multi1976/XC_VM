@@ -285,13 +285,22 @@ final class SourceHealthRepository {
 	 *
 	 * @return array<string, array{ok:int, total:int, skipped:int, skip_reason:string, open_ms:?int, speed:?float, last_at:int, last_ok:bool, last_error:string, last_kind:string, label:string}>
 	 */
-	public static function probeStats(int $rStreamID, int $rFrom): array {
+	/**
+	 * A probe can only run while the source is off air, and a source that is
+	 * normally on air is off air mostly because it has just dropped: its
+	 * probes are taken in its worst minutes. Probes within this many seconds
+	 * after a drop of that source are counted apart (after_drop, after_drop_ok).
+	 */
+	public const AFTER_DROP_SEC = 900;
+
+	/** @param array<string, list<int>> $rDrops md5(source) => times it dropped or failed to start */
+	public static function probeStats(int $rStreamID, int $rFrom, array $rDrops = []): array {
 		$rRows = self::db()->fetchAll('SELECT `source_hash`, `checked_at`, `kind`, `ok`, `open_ms`, `speed`, `label`, `error` FROM `source_health_probes` WHERE `stream_id` = ? AND `checked_at` >= ? ORDER BY `checked_at` ASC', $rStreamID, $rFrom) ?: [];
 		$rStats = [];
 		$rOpen = [];
 		foreach ($rRows as $rRow) {
 			$rHash = (string) $rRow['source_hash'];
-			$rStats[$rHash] ??= ['ok' => 0, 'total' => 0, 'skipped' => 0, 'skip_reason' => '', 'open_ms' => null, 'speed' => null, 'last_at' => 0, 'last_ok' => false, 'last_error' => '', 'last_kind' => '', 'label' => ''];
+			$rStats[$rHash] ??= ['ok' => 0, 'total' => 0, 'skipped' => 0, 'skip_reason' => '', 'open_ms' => null, 'speed' => null, 'last_at' => 0, 'last_ok' => false, 'last_error' => '', 'last_kind' => '', 'label' => '', 'after_drop' => 0, 'after_drop_ok' => 0];
 			$rStats[$rHash]['last_at'] = (int) $rRow['checked_at'];
 			$rStats[$rHash]['last_kind'] = (string) $rRow['kind'];
 			$rStats[$rHash]['last_error'] = self::raw((string) $rRow['error']);
@@ -302,6 +311,14 @@ final class SourceHealthRepository {
 			}
 			$rStats[$rHash]['total']++;
 			$rStats[$rHash]['last_ok'] = (bool) $rRow['ok'];
+			$rAt = (int) $rRow['checked_at'];
+			foreach ($rDrops[$rHash] ?? [] as $rDrop) {
+				if ($rDrop <= $rAt && $rAt - $rDrop <= self::AFTER_DROP_SEC) {
+					$rStats[$rHash]['after_drop']++;
+					$rStats[$rHash]['after_drop_ok'] += (int) $rRow['ok'];
+					break;
+				}
+			}
 			if ((int) $rRow['ok'] === 1) {
 				$rStats[$rHash]['ok']++;
 				$rOpen[$rHash][] = (int) $rRow['open_ms'];

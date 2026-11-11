@@ -31,9 +31,15 @@ final class SourceHealthTab {
 			$rEvents = SourceHealthRepository::events($rStreamID, $rFrom);
 			$rRunning = SourceHealthRepository::running($rStreamID);
 			$rDayFrom = max($rFrom, $rNow - 86400);
-			$rRows = SourceHealthCalculator::compute($rSources, $rEvents, $rFrom, $rNow, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rFrom));
+			$rDrops = [];
+			foreach ($rEvents as $rEvent) {
+				if (in_array($rEvent['action'], ['STREAM_FAILED', 'STREAM_START_FAIL'], true) && trim((string) $rEvent['source']) !== '') {
+					$rDrops[md5(trim((string) $rEvent['source']))][] = (int) $rEvent['date'];
+				}
+			}
+			$rRows = SourceHealthCalculator::compute($rSources, $rEvents, $rFrom, $rNow, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rFrom, $rDrops));
 			// The same log read over the last day only: what the source is like now.
-			$rRecent = array_column(SourceHealthCalculator::compute($rSources, $rEvents, $rDayFrom, $rNow, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rDayFrom)), null, 'index');
+			$rRecent = array_column(SourceHealthCalculator::compute($rSources, $rEvents, $rDayFrom, $rNow, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rDayFrom, $rDrops)), null, 'index');
 			$rProbing = SourceHealthRepository::probeEnabled($rStreamID);
 			$rAccounts = SourceHealthRepository::accountConnections();
 			$rErrors = SourceHealthCalculator::errorsBySource($rSources, $rEvents, SourceHealthRepository::errors($rStreamID, $rFrom), 120, SourceHealthRepository::hosts($rStreamID, 0));
@@ -66,7 +72,7 @@ final class SourceHealthTab {
 				continue;
 			}
 			$rBack = SourceHealthCalculator::recoveryStats($rRow['recoveries'] ?? []);
-			$rMoved = (int) ($rRow['moved_away'] ?? 0);
+			$rMoved = SourceHealthCalculator::recoveryStats($rRow['moved'] ?? []);
 			$rShortPct = (int) round(100 * $rStats['short'] / max(1, $rStats['count']));
 			$rPeak = max($rStats['buckets']) ?: 1;
 			$rBody .= '<tr><td class="text-start">' . ((int) $rRow['index'] + 1) . ' <small class="text-muted">' . $h(self::mask($rRow['source'])) . '</small></td>'
@@ -79,20 +85,24 @@ final class SourceHealthTab {
 				$n = (int) $rStats['buckets'][$rLabel];
 				$rBody .= '<td class="text-center' . ($n > 0 ? ($n === $rPeak ? ' bg-label-primary' : ' bg-label-secondary') : ' text-muted') . '">' . ($n > 0 ? $n : '·') . '</td>';
 			}
-			$rBody .= '<td class="text-center"><small>'
+			$rBody .= '<td class="text-start"><small>'
 				. ($rBack !== null
-					? '<span title="Of ' . (int) $rBack['count'] . ' drop(s) after which this source held again (' . intdiv(SourceHealthCalculator::HOLD_SEC, 60) . ' min or more); 3 of 4 within ' . $h(self::duration($rBack['p75'])) . ', longest ' . $h(self::duration($rBack['max'])) . '">'
-						. '<strong>' . $h(self::duration($rBack['median'])) . '</strong> · ' . (int) $rBack['attempts'] . ' tr' . ($rBack['attempts'] === 1 ? 'y' : 'ies') . '</span>'
-					: '<span class="text-muted">–</span>')
-				. ($rMoved > 0 ? '<br><span class="text-muted">' . $rMoved . '× settled on another source</span>' : '')
+					? '<span title="Drops after which this source held again (' . intdiv(SourceHealthCalculator::HOLD_SEC, 60) . ' min or more): median time to that, 3 of 4 within ' . $h(self::duration($rBack['p75'])) . ', longest ' . $h(self::duration($rBack['max'])) . '; median attempts.">'
+						. '<span class="text-success">came back ' . (int) $rBack['count'] . '×</span> in <strong>' . $h(self::duration($rBack['median'])) . '</strong> · ' . self::tries($rBack['attempts']) . '</span>'
+					: '<span class="text-muted">never came back</span>')
+				. ($rMoved !== null
+					? '<br><span title="Drops after which the stream held on another source instead: how long this one was given (median, longest ' . $h(self::duration($rMoved['max'])) . ') and how many attempts on it first (median; 0 = moved at once).">'
+						. '<span class="text-danger">moved on ' . (int) $rMoved['count'] . '×</span> after ' . $h(self::duration($rMoved['median'])) . ' · ' . self::tries($rMoved['attempts']) . '</span>'
+					: '')
 				. '</small></td>';
 			$rBody .= '<td>' . self::runPattern($rStats, $rShortPct) . '</td></tr>';
 		}
 		$rHtml = '<h6 class="mt-4 mb-1">How long runs last before they drop</h6>'
 			. '<p class="text-muted small mb-2">Every run that started and failed inside the window, per source. Runs under a minute did not hold: '
 			. 'the source dropped as soon as it was started, usually while it is coming back after a drop. The median and the spread are of the runs that held. '
-			. '<em>Back after a drop</em>: once a source that was holding drops, how long until it held again (median) and in how many attempts — '
-			. 'how long a failover should stay away from it before trying it again. Runs that end at about the same length again and again point to a timer on the provider\'s side (a session or token that expires).</p>';
+			. '<em>Back after a drop</em>: once a source that was holding drops, either it came back (held again: how long that took and in how many attempts) '
+			. 'or the stream moved on to another source (how long this one was given and how many attempts first). The two together are a failover rule: '
+			. 'how many quick retries are worth it before switching. Runs that end at about the same length again and again point to a timer on the provider\'s side (a session or token that expires).</p>';
 		if ($rBody === '') {
 			return $rHtml . '<p class="text-muted small mb-0">No complete runs that ended in a failure in the window.</p>';
 		}
@@ -101,6 +111,10 @@ final class SourceHealthTab {
 			$rHead .= '<th><small>' . $h($rLabel) . '</small></th>';
 		}
 		return $rHtml . '<div class="table-responsive"><table class="table table-sm table-bordered text-center mb-2"><thead>' . $rHead . '<th>Back after a drop</th><th>Pattern</th></tr></thead><tbody>' . $rBody . '</tbody></table></div>';
+	}
+
+	private static function tries(int $n): string {
+		return $n . ' tr' . ($n === 1 ? 'y' : 'ies');
 	}
 
 	/** @param array{count:int, short:int, held:int, median:int, steady:bool} $rStats */
@@ -156,6 +170,7 @@ final class SourceHealthTab {
 						. '</td>' : '')
 					. '<td><code class="text-wrap">' . $h($rMessage) . '</code>'
 					. ($rKind === 'gone' ? ' <span class="badge bg-label-danger" title="Says the channel, account or host is gone: retrying will not help">permanent</span>' : '')
+					. ($rKind === 'join' ? ' <span class="badge bg-label-info" title="An H.264 decoder starting in the middle of a GOP, before the first key frame: printed on almost every start and harmless. Only worth a look if it keeps coming between starts.">decoder join</span>' : '')
 					. ($rKind === 'temporary' ? ' <span class="badge bg-label-secondary" title="A passing failure: the same source can work again">temporary</span>' : '')
 					. ' <small class="text-muted" title="' . ($rSure ? 'Every line names this source\'s host' : 'Some or all of these lines name no host: placed by time') . '">' . ($rSure ? '· by host' : '· by time') . '</small></td><td class="text-center">' . (int) $rCount . '</td><td><small>' . $h(date('m-d H:i', $rLast)) . '</small></td></tr>';
 			}
@@ -351,6 +366,9 @@ final class SourceHealthTab {
 		$rClass = $rRate >= 0.95 ? 'text-success' : ($rRate >= 0.7 ? 'text-warning' : 'text-danger');
 		return '<span class="' . $rClass . '" title="' . $h($rLast) . '">' . (int) $rProbe['ok'] . '/' . (int) $rProbe['total'] . ' ok</span>'
 			. ($rProbe['open_ms'] !== null ? '<br><small class="text-muted">open ' . round($rProbe['open_ms'] / 1000, 1) . ' s' . ($rProbe['speed'] !== null ? ' · ' . ($rProbe['speed'] >= 10 ? '≥10' : $rProbe['speed']) . 'x' : '') . '</small>' : '')
+			. (($rProbe['after_drop'] ?? 0) > 0 ? '<br><small class="text-muted" title="A source can only be probed while it is off air. These probes ran within ' . intdiv(SourceHealthRepository::AFTER_DROP_SEC, 60) . ' min after it had dropped, in its worst minutes; for a source that is usually on air they say more about how it comes back than about how it runs.">'
+				. (int) $rProbe['after_drop'] . ' right after a drop (' . (int) $rProbe['after_drop_ok'] . ' ok)'
+				. ($rProbe['total'] > $rProbe['after_drop'] ? ' · other ' . ($rProbe['ok'] - $rProbe['after_drop_ok']) . '/' . ($rProbe['total'] - $rProbe['after_drop']) . ' ok' : '') . '</small>' : '')
 			. ($rProbe['last_kind'] === 'probe' && !$rProbe['last_ok'] ? '<br><small class="text-danger">' . $h($rProbe['last_error']) . '</small>' : '')
 			. $rSkipped;
 	}

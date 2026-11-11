@@ -182,6 +182,9 @@ final class SourceHealthProbeTest extends TestCase {
 				SourceHealthRepository::saveProbe(5, 'http://b/2.ts', ['ok' => $rOk, 'open_ms' => $rOpen, 'speed' => $rOk ? 1.2 : null, 'label' => 'h264 1920x1080 25i', 'error' => $rOk ? '' : 'could not open: timed out'], 1000 + $i);
 			}
 			SourceHealthRepository::saveSkip(5, 'http://a/1.ts', 'on air', 1010);
+			$rAfter = SourceHealthRepository::probeStats(5, 0, [md5('http://b/2.ts') => [50, 995]]); // 995: 5 s before the three probes
+			$this->assertSame([3, 2], [$rAfter[md5('http://b/2.ts')]['after_drop'], $rAfter[md5('http://b/2.ts')]['after_drop_ok']]);
+			$this->assertSame(0, SourceHealthRepository::probeStats(5, 0, [md5('http://b/2.ts') => [50]])[md5('http://b/2.ts')]['after_drop']); // 950 s before: too long ago
 			$rStats = SourceHealthRepository::probeStats(5, 0);
 
 			$this->assertSame([2, 3, 1100, false], [$rStats[md5('http://b/2.ts')]['ok'], $rStats[md5('http://b/2.ts')]['total'], $rStats[md5('http://b/2.ts')]['open_ms'], $rStats[md5('http://b/2.ts')]['last_ok']]);

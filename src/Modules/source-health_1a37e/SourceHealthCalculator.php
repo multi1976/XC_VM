@@ -291,6 +291,7 @@ final class SourceHealthCalculator {
 	private static function recoveries(array &$rStats, array $rLine, int $rFrom): void {
 		usort($rLine, static fn (array $a, array $b): int => $a[1] <=> $b[1]);
 		$rOutage = null; // [source, dropped at, attempts]
+		// moved: [seconds the source was given before the stream settled elsewhere, attempts on it]
 		foreach ($rLine as [$rSrc, $rSince, $rEnd, $rFailed, $rLive]) {
 			$rHeld = $rEnd - $rSince >= self::HOLD_SEC;
 			if ($rOutage !== null) {
@@ -299,6 +300,7 @@ final class SourceHealthCalculator {
 					$rOutage = null;
 				} elseif ($rHeld) {
 					$rStats[$rOutage[0]]['moved_away']++;
+					$rStats[$rOutage[0]]['moved'][] = [max(0, $rSince - $rOutage[1]), $rOutage[2]];
 					$rOutage = null;
 				} elseif ($rSrc === $rOutage[0]) {
 					$rOutage[2]++;
@@ -311,6 +313,8 @@ final class SourceHealthCalculator {
 	}
 
 	/**
+	 * Also used for the drops that ended on another source: [seconds given, attempts].
+	 *
 	 * @param list<array{0:int, 1:int}> $rRecoveries [seconds until it held again, attempts]
 	 * @return array{count:int, median:int, p75:int, max:int, attempts:int}|null
 	 */
@@ -582,8 +586,16 @@ final class SourceHealthCalculator {
 	/** Length at which streams_errors.error cuts a line. */
 	private const ERROR_COLUMN = 500;
 
-	/** What a message says about the source: 'gone' (will not come back by itself), 'temporary', or null. */
+	/**
+	 * What a message says about the source: 'gone' (will not come back by
+	 * itself), 'temporary', 'join' (an H.264 decoder starting mid-GOP, before
+	 * the first key frame: printed on almost every start, says nothing about
+	 * the source unless it keeps coming between starts), or null.
+	 */
 	public static function reasonKind(string $rMessage): ?string {
+		if (preg_match('~mmco: unref short|reference frames \(.*\) exceeds max|non-existing PPS|decode_slice_header error|no frame!|co located POCs unavailable|missing picture in access unit|top block unavailable for requested intra~i', $rMessage)) {
+			return 'join';
+		}
 		if (preg_match("~doesn't exist|does not exist|not exist|no such host|expired|banned|blocked|disabled|suspended|not allowed|invalid (user|login|credentials|account)|unauthori[sz]ed|forbidden|http 40[13]\b|not in (your |the )?bouquet~i", $rMessage)) {
 			return 'gone';
 		}
@@ -634,7 +646,7 @@ final class SourceHealthCalculator {
 	private static function blank(int $rIndex, string $rSource): array {
 		return [
 			'index' => $rIndex, 'source' => $rSource,
-			'starts' => 0, 'start_fails' => 0, 'failures' => 0, 'incidents' => 0, 'incident_times' => [], 'start_fail_times' => [], 'run_lengths' => [], 'recoveries' => [], 'moved_away' => 0, 'last_drop' => 0,
+			'starts' => 0, 'start_fails' => 0, 'failures' => 0, 'incidents' => 0, 'incident_times' => [], 'start_fail_times' => [], 'run_lengths' => [], 'recoveries' => [], 'moved_away' => 0, 'moved' => [], 'last_drop' => 0,
 			'quality_issues' => 0, 'switched_away' => 0,
 			'uptime_sec' => 0, 'last_active' => 0, 'last_failure' => 0,
 			'running' => false, 'score' => null, 'confidence' => 'none',

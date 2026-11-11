@@ -326,6 +326,7 @@ final class SourceHealthCalculatorTest extends TestCase {
 
 		$this->assertSame([[60, 3]], $rRows[0]['recoveries']);
 		$this->assertSame(1, $rRows[0]['moved_away']);
+		$this->assertSame([[10, 0]], $rRows[0]['moved']);                 // moved on at once, no retry
 		$this->assertSame(['count' => 1, 'median' => 60, 'p75' => 60, 'max' => 60, 'attempts' => 3], SourceHealthCalculator::recoveryStats($rRows[0]['recoveries']));
 		$this->assertNull(SourceHealthCalculator::recoveryStats([]));
 
@@ -350,6 +351,8 @@ final class SourceHealthCalculatorTest extends TestCase {
 		$this->assertSame('temporary', SourceHealthCalculator::reasonKind('Get "(url)": net/http: timeout awaiting response headers'));
 		$this->assertSame('temporary', SourceHealthCalculator::reasonKind('remux: source ended'));
 		$this->assertNull(SourceHealthCalculator::reasonKind('remux: unsupported source: http 404'));
+		$this->assertSame('join', SourceHealthCalculator::reasonKind('mmco: unref short failure'));
+		$this->assertSame('join', SourceHealthCalculator::reasonKind('number of reference frames (#+#) exceeds max (#; probably corrupt input), discarding one'));
 	}
 
 	public function testALineTimeStampIsUsedAndATimeZoneOffsetTakenOut(): void {
