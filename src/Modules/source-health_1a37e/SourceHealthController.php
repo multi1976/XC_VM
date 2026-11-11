@@ -32,6 +32,25 @@ class SourceHealthController extends BaseAjaxController {
 		echo '</body></html>';
 	}
 
+	/** `source_audit` — every source of every live stream, by state (Content → Streams → Source Audit). */
+	public function audit(): void {
+		if (!Authorization::check('adv', 'streams')) {
+			AdminHelpers::goHome();
+			exit;
+		}
+		$GLOBALS['_TITLE'] = 'Source Audit';
+		LayoutRenderer::renderHeader('admin');
+		try {
+			$rBody = SourceAuditPage::render(['status' => RequestManager::get('status', 'problems'), 'host' => RequestManager::get('host', '')], time());
+		} catch (\Throwable $e) {
+			error_log('source-health audit: ' . $e->getMessage());
+			$rBody = '<p class="text-danger mb-0">The audit could not be shown: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES) . '</p>';
+		}
+		echo '<div class="card"><div class="card-header"><h5 class="card-title mb-0">Source Audit</h5></div><div class="card-body">' . $rBody . '</div></div>';
+		LayoutRenderer::renderFooter('admin');
+		echo '</body></html>';
+	}
+
 	public function probe(): never {
 		$this->requireXhr();
 		$this->gateAny([['adv', 'edit_stream']]);

@@ -40,6 +40,8 @@ class SourceHealthCronJob implements CommandInterface {
 		SourceHealthCron::run(time());
 		// Active probes of the streams the admin opted in (none by default).
 		SourceProber::run(time(), (string) FfmpegPaths::probe(), (string) FfmpegPaths::cpu());
+		// Source Audit: a light check of every source of every live stream, a few at a time.
+		SourceAudit::run(time());
 		return 0;
 	}
 }

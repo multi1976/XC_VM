@@ -236,6 +236,62 @@ final class SourceHealthRepository {
 		return $rCounts;
 	}
 
+	/**
+	 * Every source of every live stream, once each.
+	 *
+	 * @return array<string, array{source:string, stream_id:int}> md5(source) => the source and one stream that has it
+	 */
+	public static function allLiveSources(): array {
+		$rOut = [];
+		foreach (self::liveStreams() as $rRow) {
+			foreach ($rRow['sources'] as $rSource) {
+				$rOut[md5($rSource)] ??= ['source' => $rSource, 'stream_id' => (int) $rRow['id']];
+			}
+		}
+		return $rOut;
+	}
+
+	/** @return list<array{id:int, name:string, sources:list<string>}> every live stream with its sources, in list order */
+	public static function liveStreams(): array {
+		$rOut = [];
+		foreach (self::db()->fetchAll('SELECT `id`, `stream_display_name`, `stream_source` FROM `streams` WHERE `type` = 1 ORDER BY `id`') ?: [] as $rRow) {
+			$rSources = [];
+			foreach ((array) json_decode(self::raw((string) $rRow['stream_source']), true) as $rSource) {
+				$rSources[] = is_string($rSource) ? trim($rSource) : '';
+			}
+			$rOut[] = ['id' => (int) $rRow['id'], 'name' => self::raw((string) $rRow['stream_display_name']), 'sources' => $rSources];
+		}
+		return $rOut;
+	}
+
+	/** @return array<string, array<string, mixed>> md5(source) => last audit verdict */
+	public static function auditState(): array {
+		$rOut = [];
+		foreach (self::db()->fetchAll('SELECT * FROM `source_health_audit`') ?: [] as $rRow) {
+			$rRow['reason'] = self::raw((string) $rRow['reason']);
+			$rOut[(string) $rRow['source_hash']] = $rRow;
+		}
+		return $rOut;
+	}
+
+	/** @param array{status:string, kind:?string, reason:string, fails:int, first_fail:int, last_ok:int} $rVerdict */
+	public static function saveAudit(string $rHash, string $rHost, array $rVerdict, ?int $rMs, int $rNow): void {
+		self::db()->query(
+			'REPLACE INTO `source_health_audit` (`source_hash`, `host`, `checked_at`, `status`, `kind`, `reason`, `fails`, `first_fail`, `last_ok`, `ms`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+			$rHash, mb_substr($rHost, 0, 190), $rNow, $rVerdict['status'], $rVerdict['kind'], mb_substr($rVerdict['reason'], 0, 250),
+			min(65535, $rVerdict['fails']), $rVerdict['first_fail'], $rVerdict['last_ok'], $rMs
+		);
+	}
+
+	/** Forget sources no live stream has any more. @param list<string> $rKeep md5 of every current source */
+	public static function pruneAudit(array $rKeep): void {
+		$rKeep = array_flip($rKeep);
+		$rGone = array_values(array_filter(self::db()->fetchColumn('SELECT `source_hash` FROM `source_health_audit`') ?: [], static fn ($h): bool => !isset($rKeep[(string) $h])));
+		foreach (array_chunk($rGone, 500) as $rChunk) {
+			self::db()->query('DELETE FROM `source_health_audit` WHERE `source_hash` IN (' . implode(',', array_fill(0, count($rChunk), '?')) . ')', ...$rChunk);
+		}
+	}
+
 	/** @return list<string> every source on air on the panel right now (all streams, all servers) */
 	public static function onAirSources(): array {
 		return array_values(array_unique(array_map('trim', self::db()->fetchColumn(

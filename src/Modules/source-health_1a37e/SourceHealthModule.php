@@ -8,6 +8,8 @@ use XcVm\Core\Events\ListensTo;
 use XcVm\Core\Http\Router;
 use XcVm\Core\Events\Stream\StreamsDeletedEvent;
 use XcVm\Core\Module\BaseModule;
+use XcVm\Core\Module\NavbarItem;
+use XcVm\Core\Module\NavbarRegistry;
 use XcVm\Core\Module\StreamFormRegistry;
 
 /**
@@ -23,7 +25,7 @@ class SourceHealthModule extends BaseModule {
 	}
 
 	public function getVersion(): string {
-		return '0.2.2';
+		return '0.3.0';
 	}
 
 	public function boot(ServiceContainer $container): void {
@@ -37,6 +39,13 @@ class SourceHealthModule extends BaseModule {
 	public function registerRoutes(Router $router): void {
 		$router->get('source_health', [SourceHealthController::class, 'page'], ['permission' => static fn (): bool => \XcVm\Core\Auth\Authorization::check('adv', 'edit_stream')]);
 		$router->api('source_health_probe', [SourceHealthController::class, 'probe']);
+		$router->get('source_audit', [SourceHealthController::class, 'audit'], ['permission' => static fn (): bool => \XcVm\Core\Auth\Authorization::check('adv', 'streams')]);
+	}
+
+	public function registerNavbar(NavbarRegistry $registry): void {
+		NavbarRegistry::add((new NavbarItem('content.streams.source_audit'))
+			->parent('content.streams')->url('source_audit')
+			->label('', 'Source Audit')->permissions(['streams'])->order(45));
 	}
 
 	public function registerCommands(CommandRegistry $registry): void {
