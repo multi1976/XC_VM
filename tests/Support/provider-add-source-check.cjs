@@ -27,8 +27,9 @@ $.ajax = config => {
 };
 const esc = text => String(text).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 const urls = [];
+const sourceInputs = [{ value: ' https://example.test/already ' }];
 const context = { $, esc, escAttr: esc,
-    document: { getElementById: id => id === 'providerModal' ? modal : result },
+    document: { getElementById: id => id === 'providerModal' ? modal : result, querySelectorAll: () => sourceInputs },
     probingBadge: 'Probing',
     probeURL: url => { urls.push(url); return 'existing-probe-with-selected-server'; },
     renderProbe: html => 'existing renderer: ' + html
@@ -38,6 +39,10 @@ const html = context.providerAddButton({ name: 'Channel', stream_url: 'https://e
 assert.match(html, /prov-add/);
 assert.match(html, /prov-check/);
 assert.equal(html.includes('"<unsafe>'), false);
+// A source already in the stream shows as added, and cannot be added twice.
+const listed = context.providerAddButton({ name: 'Channel', stream_url: 'https://example.test/already' });
+assert.match(listed, /prov-add[^>]*disabled/);
+assert.doesNotMatch(html, /prov-add[^>]*disabled/);
 const buttonNode = probeButton({ dataset: { url: 'https://source.test/live' } });
 handlers['.prov-check'].call(buttonNode);
 handlers['.prov-check'].call(buttonNode);

@@ -977,9 +977,6 @@ LayoutRenderer::renderFooter('admin');
                 return '<div class="fw-medium text-body">' + esc(row.name) + '</div>' +
                     '<small class="text-muted">' + (row.category ? esc(row.category) + ' · ' : '') + 'ID ' + esc(String(row.provider_stream_id || '')) + '</small>';
             }
-            function sourceListed(url) {
-                return Array.prototype.some.call(document.querySelectorAll('.src-input'), function(i) { return i.value.trim() === url; });
-            }
             function providerAddButton(row) {
                 var added = sourceListed(row.stream_url);
                 return '<div class="d-flex flex-wrap justify-content-center gap-1">' +
@@ -987,6 +984,10 @@ LayoutRenderer::renderFooter('admin');
                     '<i class="icon-base ti ' + (added ? 'tabler-check' : 'tabler-plus') + ' icon-14px me-1"></i>' + esc(added ? <?= json_encode($language::get('added') ?: 'Added'); ?> : <?= json_encode($language::get('add') ?: 'Add'); ?>) + '</button>' +
                     '<button type="button" class="btn btn-sm btn-label-secondary text-wrap prov-check" data-url="' + escAttr(row.stream_url) + '">' + esc(<?= json_encode($language::get('scan_source')); ?>) + '</button>' +
                     '</div>';
+            }
+            // Is this URL among the stream's sources already?
+            function sourceListed(url) {
+                return Array.prototype.some.call(document.querySelectorAll('.src-input'), function(i) { return i.value.trim() === url; });
             }
             var provTable = $('#datatable-provider-streams').DataTable({
                 serverSide: true,
