@@ -74,6 +74,16 @@ class ProviderService {
 					$rArray[$rKey] = 0;
 				}
 			}
+			// What the hourly sync fetches. Only the provider form carries these
+			// switches (it marks itself with sync_form): any other caller keeps
+			// the stored choice, or for a new provider all three, as before.
+			foreach (['sync_live', 'sync_vod', 'sync_series'] as $rKey) {
+				if (isset($rData['sync_form'])) {
+					$rArray[$rKey] = isset($rData[$rKey]) ? 1 : 0;
+				} elseif (!isset($rData['edit'])) {
+					$rArray[$rKey] = 1;
+				}
+			}
 
 			if (isset($rData['edit'])) {
 				$db->query('SELECT `id` FROM `providers` WHERE `ip` = ? AND `username` = ? AND `id` <> ? LIMIT 1;', $rArray['ip'], $rArray['username'], $rData['edit']);

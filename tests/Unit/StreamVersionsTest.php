@@ -376,7 +376,7 @@ final class StreamVersionsTest extends TestCase {
 			'Domain/Cluster/EventIngest.php::recordingState', 'Domain/Cluster/EventIngest.php::vodAnalysis', 'Domain/Cluster/EventIngest.php::streamWorker',
 			'Domain/Stream/StreamRowMerge.php::apply',
 			// MAIN's catalogue metadata from TMDb and providers: the agent's section hashes pick it up.
-			'Domain/Vod/TmdbCron.php::processMovie', 'Domain/Vod/TmdbCron.php::processEpisode', 'Cli/CronJobs/ProvidersCronJob.php::loadCron',
+			'Domain/Vod/TmdbCron.php::processMovie', 'Domain/Vod/TmdbCron.php::processEpisode', 'Cli/CronJobs/ProvidersCronJob.php::syncProvider',
 			// Private helpers of process() and massEdit(), which dispatch for the stream.
 			'Domain/Stream/RadioService.php::saveStreamOptions', 'Domain/Stream/RadioService.php::syncServerTree', 'Domain/Stream/RadioService.php::planServerTreeForStream',
 			// Assignments whose server or stream is gone: no node to tell, or a stream whose delete dispatched.

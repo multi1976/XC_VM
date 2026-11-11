@@ -1242,6 +1242,9 @@ CREATE TABLE IF NOT EXISTS `providers` (
   `status` tinyint(1) DEFAULT '0',
   `ssl` tinyint(1) DEFAULT '0',
   `hls` tinyint(1) DEFAULT '0',
+  `sync_live` tinyint(1) NOT NULL DEFAULT '1',
+  `sync_vod` tinyint(1) NOT NULL DEFAULT '1',
+  `sync_series` tinyint(1) NOT NULL DEFAULT '1',
   PRIMARY KEY (`id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
 

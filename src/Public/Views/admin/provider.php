@@ -87,6 +87,22 @@ $rIsEdit = isset($rProvider);
                             </div>
                         <?php endforeach; ?>
                     </div>
+                    <input type="hidden" name="sync_form" value="1">
+                    <h6 class="mt-4 mb-1"><?= $language::get('provider_sync'); ?></h6>
+                    <p class="text-muted small mb-2"><?= $language::get('provider_sync_help'); ?></p>
+                    <div class="row g-3">
+                        <?php
+                        foreach (['sync_live' => 'provider_sync_live', 'sync_vod' => 'provider_sync_vod', 'sync_series' => 'provider_sync_series'] as $rKey => $rLabelKey):
+                            $rChecked = !$rIsEdit || !isset($rProvider[$rKey]) || $rProvider[$rKey] == 1;
+                        ?>
+                            <div class="col-6 col-md-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="<?= $rKey; ?>" name="<?= $rKey; ?>" value="1" <?= $rChecked ? 'checked' : ''; ?>>
+                                    <label class="form-check-label" for="<?= $rKey; ?>"><?= htmlspecialchars((string) $language::get($rLabelKey), ENT_QUOTES); ?></label>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
                 </div>
                 <?php if ($rIsEdit): ?>
                     <?php
