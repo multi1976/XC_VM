@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 use XcVm\Infrastructure\Database\DatabaseFactory;
+use XcVm\Module\SourceHealth\ProviderAccount;
 use XcVm\Module\SourceHealth\SourceAudit;
 use XcVm\Module\SourceHealth\SourceAuditPage;
 use XcVm\Module\SourceHealth\SourceHealthRepository;
@@ -19,7 +20,7 @@ final class SourceAuditTest extends TestCase {
 		if ($rDir === null) {
 			self::markTestSkipped('The source-health module is not installed in this tree.');
 		}
-		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'SourceAudit', 'SourceAuditPage'] as $rClass) {
+		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'SourceAudit', 'SourceAuditPage'] as $rClass) {
 			require_once $rDir . '/' . $rClass . '.php';
 		}
 	}
@@ -36,6 +37,41 @@ final class SourceAuditTest extends TestCase {
 			+ self::src('http://q.example/x/5.ts');
 		$rDue = SourceAudit::plan($rSources, [], ['http://p.example/live/u/p/1.ts'], 100000);
 		$this->assertSame(['http://p.example/live/other/pw/3.ts', 'http://q.example/x/5.ts'], array_column($rDue, 'source'));
+	}
+
+	public function testTheProviderSaysWhetherABusyAccountHasAConnectionToSpare(): void {
+		$this->assertSame(['key' => 'http://p.example:8080/live/u/p/', 'host' => 'p.example', 'base' => 'http://p.example:8080', 'user' => 'u', 'pass' => 'p'], ProviderAccount::parse('http://p.example:8080/live/u/p/1.ts'));
+		$this->assertSame(['u2', 'p@2'], array_values(array_intersect_key((array) ProviderAccount::parse('http://h.example/u2/p%402/77'), ['user' => 1, 'pass' => 1])));
+		$this->assertNull(ProviderAccount::parse('http://h.example/stream.m3u8'));
+		$this->assertNull(ProviderAccount::parse('rtmp://h.example/live/u/p/1'));
+
+		$rInfo = ProviderAccount::fromApi(['user_info' => ['auth' => 1, 'status' => 'Active', 'max_connections' => '3', 'active_cons' => '1', 'exp_date' => '1900000000']]);
+		$this->assertSame(['api' => true, 'auth' => true, 'status' => 'Active', 'max' => 3, 'active' => 1, 'exp' => 1900000000], $rInfo);
+		$this->assertFalse(ProviderAccount::fromApi('<html>')['api']);
+
+		$rNow = 1_800_000_000;
+		$this->assertTrue(ProviderAccount::admits($rInfo + ['checked_at' => $rNow - 60], $rNow));             // 1 used + the check + 1 spare = 3
+		$this->assertFalse(ProviderAccount::admits(['active' => 2] + $rInfo + ['checked_at' => $rNow], $rNow)); // full
+		$this->assertFalse(ProviderAccount::admits($rInfo + ['checked_at' => $rNow - 600], $rNow));            // stale word
+		$this->assertFalse(ProviderAccount::admits(['max' => 0] + $rInfo + ['checked_at' => $rNow], $rNow));
+		$this->assertFalse(ProviderAccount::admits(null, $rNow));
+
+		$this->assertNull(ProviderAccount::deadReason($rInfo, $rNow));
+		$this->assertSame('account: expired', ProviderAccount::deadReason(['status' => 'Expired'] + $rInfo, $rNow));
+		$this->assertSame('account: invalid login (the provider refused it)', ProviderAccount::deadReason(ProviderAccount::fromApi(['user_info' => ['auth' => 0]]), $rNow));
+		$this->assertStringStartsWith('account: expired on ', (string) ProviderAccount::deadReason(['exp' => $rNow - 10] + $rInfo, $rNow));
+		$this->assertSame('gone', \XcVm\Module\SourceHealth\SourceHealthCalculator::reasonKind('account: invalid login (the provider refused it)'));
+
+		// The audit: a source on a busy account goes only on fresh word, one per account per run.
+		$rSources = self::src('http://p.example/live/u/p/1.ts') + self::src('http://p.example/live/u/p/2.ts') + self::src('http://p.example/live/u/p/3.ts');
+		$rOnAir = ['http://p.example/live/u/p/1.ts'];
+		$rDue = SourceAudit::due($rSources, [], $rOnAir, $rNow);
+		$this->assertSame([true, true], array_column($rDue, 'busy'));
+		$this->assertSame(['http://p.example:/live/u/p/'], SourceAudit::accountsToAsk($rDue, [], $rNow));
+		$rAccounts = [md5('http://p.example:/live/u/p/') => $rInfo + ['checked_at' => $rNow]];
+		$this->assertSame([], SourceAudit::accountsToAsk($rDue, $rAccounts, $rNow));
+		$this->assertSame(['http://p.example/live/u/p/2.ts'], array_column(SourceAudit::admit($rDue, $rAccounts, $rNow), 'source'));
+		$this->assertSame([], SourceAudit::admit($rDue, [], $rNow));
 	}
 
 	public function testIntervalsOrderAndTheCapPerProvider(): void {
@@ -143,13 +179,72 @@ final class SourceAuditTest extends TestCase {
 			$this->assertEqualsCanonicalizing([md5($rB), md5($rC)], array_keys($rState));       // old.example is in no stream any more
 			$this->assertSame('dead', $rState[md5($rC)]['status']);
 
+			$this->assertSame(1, SourceHealthRepository::requeueAudit([md5($rC), 'not-a-hash']));
+			$this->assertSame(0, (int) SourceHealthRepository::auditState()[md5($rC)]['checked_at']);
+			SourceHealthRepository::saveAccount(md5('http://q.example:/live/v/w/'), 'q.example', ['api' => true, 'auth' => true, 'status' => 'Active', 'max' => 50, 'active' => 8, 'exp' => null], 1900);
+			$this->assertSame(['api' => true, 'auth' => true, 'status' => 'Active', 'max' => 50, 'active' => 8, 'exp' => null, 'checked_at' => 1900, 'host' => 'q.example'], SourceHealthRepository::accounts()[md5('http://q.example:/live/v/w/')]);
+
 			$rHtml = SourceAuditPage::render(['status' => 'problems'], 2000);
 			$this->assertStringContainsString('Dead + down: 2', $rHtml);                    // the dead source in two streams
 			$this->assertStringContainsString('On air: 1', $rHtml);
 			$this->assertStringContainsString('every checked source off', $rHtml);          // dead.example: both its sources off
 			$this->assertStringNotContainsString('/u/p/', $rHtml);                          // accounts masked
 			$this->assertSame(2, substr_count($rHtml, '>Dead</span>'));
+			$this->assertStringContainsString('Recheck all shown (1)', $rHtml);
+			$this->assertStringContainsString('queued', $rHtml);
+			$rFound = SourceAuditPage::render(['status' => 'all', 'q' => 'sport'], 2000);
+			$this->assertStringContainsString('Sport', $rFound);
+			$this->assertStringNotContainsString('>News<', $rFound);
+			$this->assertStringContainsString('account 8/50 conn.', SourceAuditPage::render(['status' => 'all'], 2000));
 		} finally {
+			DatabaseFactory::reset();
+		}
+	}
+
+	public function testARecheckNeverTakesTheLastConnectionOfABusyAccount(): void {
+		$rDb = new TestDb();
+		foreach (['streams', 'streams_servers'] as $rTable) {
+			$rDb->exec(InstallSchema::table($rTable));
+		}
+		$rSchema = (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/source-health_*')[0] . '/database.sql');
+		foreach (array_filter(array_map('trim', explode(';', $rSchema))) as $rStatement) {
+			$rDb->exec($rStatement);
+		}
+		DatabaseFactory::set($rDb);
+		$rDir = sys_get_temp_dir() . '/sh-recheck-' . getmypid();
+		@mkdir($rDir);
+		$rPort = 22000 + getmypid() % 1000;
+		file_put_contents($rDir . '/active', '1');
+		file_put_contents($rDir . '/router.php', '<?php $u = $_SERVER["REQUEST_URI"];'
+			. ' if (str_starts_with($u, "/player_api.php")) { header("Content-Type: application/json"); echo json_encode(["user_info" => ["auth" => 1, "status" => "Active", "max_connections" => "3", "active_cons" => trim(file_get_contents(__DIR__ . "/active")), "exp_date" => null]]); return true; }'
+			. ' if (str_starts_with($u, "/live/")) { file_put_contents(__DIR__ . "/hit", $u, FILE_APPEND); header("Content-Type: video/mp2t"); echo str_repeat("\x47" . str_repeat("\x00", 187), 50); return true; } http_response_code(404); return true;');
+		$rServer = proc_open(['php', '-S', '127.0.0.1:' . $rPort, $rDir . '/router.php'], [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $rPipes);
+		usleep(400000);
+		try {
+			$rLive = 'http://127.0.0.1:' . $rPort . '/live/u/p/1.ts';
+			$rBackup = 'http://127.0.0.1:' . $rPort . '/live/u/p/2.ts';
+			$rDb->query("INSERT INTO `streams` (`id`, `type`, `stream_display_name`, `stream_source`) VALUES (5, 1, 'News', ?)", json_encode([$rLive, $rBackup]));
+			$rDb->query("INSERT INTO `streams_servers` (`stream_id`, `server_id`, `pid`, `stream_status`, `current_source`) VALUES (5, 1, 10, 0, ?)", $rLive);
+
+			$rOnAir = SourceAudit::recheckNow(5, md5($rLive));
+			$this->assertFalse($rOnAir['ok']);
+			$this->assertStringContainsString('on air', $rOnAir['message']);
+
+			$rOk = SourceAudit::recheckNow(5, md5($rBackup));                     // 1 of 3 in use: the check and a spare fit
+			$this->assertTrue($rOk['ok'], $rOk['message']);
+			$this->assertSame('ok', SourceHealthRepository::auditState()[md5($rBackup)]['status']);
+
+			file_put_contents($rDir . '/active', '2');                             // 2 of 3: the check would leave no spare
+			@unlink($rDir . '/hit');
+			$rFull = SourceAudit::recheckNow(5, md5($rBackup));
+			$this->assertFalse($rFull['ok']);
+			$this->assertStringContainsString('no connection to spare (2/3 in use)', $rFull['message']);
+			$this->assertFileDoesNotExist($rDir . '/hit');                          // no stream request was made
+		} finally {
+			proc_terminate($rServer);
+			proc_close($rServer);
+			array_map('unlink', glob($rDir . '/*'));
+			@rmdir($rDir);
 			DatabaseFactory::reset();
 		}
 	}

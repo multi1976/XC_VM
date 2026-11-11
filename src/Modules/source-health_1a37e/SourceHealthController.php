@@ -41,7 +41,7 @@ class SourceHealthController extends BaseAjaxController {
 		$GLOBALS['_TITLE'] = 'Source Audit';
 		LayoutRenderer::renderHeader('admin');
 		try {
-			$rBody = SourceAuditPage::render(['status' => RequestManager::get('status', 'problems'), 'host' => RequestManager::get('host', '')], time());
+			$rBody = SourceAuditPage::render(['status' => RequestManager::get('status', 'problems'), 'host' => RequestManager::get('host', ''), 'q' => RequestManager::get('q', '')], time());
 		} catch (\Throwable $e) {
 			error_log('source-health audit: ' . $e->getMessage());
 			$rBody = '<p class="text-danger mb-0">The audit could not be shown: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES) . '</p>';
@@ -49,6 +49,25 @@ class SourceHealthController extends BaseAjaxController {
 		echo '<div class="card"><div class="card-header"><h5 class="card-title mb-0">Source Audit</h5></div><div class="card-body">' . $rBody . '</div></div>';
 		LayoutRenderer::renderFooter('admin');
 		echo '</body></html>';
+	}
+
+	/** `api?action=source_audit_recheck` — one source now (hash + stream_id), or put many at the front of the queue (hashes). */
+	public function recheck(): never {
+		$this->requireXhr();
+		$this->gateAny([['adv', 'streams']]);
+		if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+			$this->fail();
+		}
+		$rHashes = json_decode((string) RequestManager::get('hashes', ''), true);
+		if (is_array($rHashes)) {
+			$this->ok(['queued' => SourceHealthRepository::requeueAudit($rHashes)]);
+		}
+		$rHash = (string) RequestManager::get('hash', '');
+		if (preg_match('/^[0-9a-f]{32}$/', $rHash) !== 1) {
+			$this->fail();
+		}
+		$rResult = SourceAudit::recheckNow((int) RequestManager::get('stream_id', 0), $rHash);
+		$rResult['ok'] ? $this->ok(['message' => $rResult['message']]) : $this->fail(['message' => $rResult['message']]);
 	}
 
 	public function probe(): never {

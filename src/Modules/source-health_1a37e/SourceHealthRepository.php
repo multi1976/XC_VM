@@ -283,6 +283,42 @@ final class SourceHealthRepository {
 		);
 	}
 
+	/** @return array<string, array{api:bool, auth:?bool, status:string, max:?int, active:?int, exp:?int, checked_at:int, host:string}> md5(account key) => what the provider said */
+	public static function accounts(): array {
+		$rOut = [];
+		foreach (self::db()->fetchAll('SELECT * FROM `source_health_accounts`') ?: [] as $rRow) {
+			$rOut[(string) $rRow['account_hash']] = [
+				'api' => (bool) $rRow['api'], 'auth' => $rRow['auth'] === null ? null : (bool) $rRow['auth'], 'status' => self::raw((string) $rRow['status']),
+				'max' => $rRow['max_conn'] === null ? null : (int) $rRow['max_conn'], 'active' => $rRow['active_cons'] === null ? null : (int) $rRow['active_cons'],
+				'exp' => $rRow['exp_date'] === null ? null : (int) $rRow['exp_date'], 'checked_at' => (int) $rRow['checked_at'], 'host' => self::raw((string) $rRow['host']),
+			];
+		}
+		return $rOut;
+	}
+
+	/** @param array{api:bool, auth:?bool, status:string, max:?int, active:?int, exp:?int} $rInfo */
+	public static function saveAccount(string $rHash, string $rHost, array $rInfo, int $rNow): void {
+		self::db()->query(
+			'REPLACE INTO `source_health_accounts` (`account_hash`, `host`, `checked_at`, `api`, `auth`, `status`, `max_conn`, `active_cons`, `exp_date`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+			$rHash, mb_substr($rHost, 0, 190), $rNow, $rInfo['api'] ? 1 : 0, $rInfo['auth'] === null ? null : ($rInfo['auth'] ? 1 : 0),
+			$rInfo['status'], $rInfo['max'], $rInfo['active'], $rInfo['exp']
+		);
+	}
+
+	public static function pruneAccounts(int $rNow): void {
+		self::db()->query('DELETE FROM `source_health_accounts` WHERE `checked_at` < ?', $rNow - self::PROBE_TTL_SEC);
+	}
+
+	/** Put sources at the front of the audit queue (checked within the next runs, provider caps still apply). @param list<string> $rHashes */
+	public static function requeueAudit(array $rHashes): int {
+		$n = 0;
+		foreach (array_chunk(array_values(array_unique(array_filter($rHashes, static fn ($h): bool => is_string($h) && preg_match('/^[0-9a-f]{32}$/', $h) === 1))), 500) as $rChunk) {
+			self::db()->query('UPDATE `source_health_audit` SET `checked_at` = 0 WHERE `source_hash` IN (' . implode(',', array_fill(0, count($rChunk), '?')) . ')', ...$rChunk);
+			$n += count($rChunk);
+		}
+		return $n;
+	}
+
 	/** Forget sources no live stream has any more. @param list<string> $rKeep md5 of every current source */
 	public static function pruneAudit(array $rKeep): void {
 		$rKeep = array_flip($rKeep);

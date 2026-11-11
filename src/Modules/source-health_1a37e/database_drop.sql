@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS `source_health_accounts`;
 DROP TABLE IF EXISTS `source_health_audit`;
 DROP TABLE IF EXISTS `source_health_hosts`;
 DROP TABLE IF EXISTS `source_health_probes`;
