@@ -80,7 +80,10 @@ final class SourceAuditTest extends TestCase {
 		$rLevel = static fn (array $s): string => StreamHealth::assess($s)['level'];
 		$this->assertSame('no_working', $rLevel(['dead', 'down', 'pending']));
 		$this->assertSame('no_working', $rLevel(['dead']));
-		$this->assertSame('no_backup', $rLevel(['dead', 'on_air', 'down']));
+		$this->assertSame('first_off', $rLevel(['dead', 'on_air', 'ok']));              // the first source has priority: it is tried first on every start
+		$rBoth = StreamHealth::assess(['dead', 'on_air', 'down']);
+		$this->assertSame(['first_off', true, true], [$rBoth['level'], $rBoth['first_off'], $rBoth['no_backup']]);
+		$this->assertSame('no_backup', $rLevel(['on_air', 'dead', 'down']));
 		$this->assertSame('mostly_off', $rLevel(['ok', 'dead', 'pending', 'down']));    // two of four off, a backup not checked yet
 		$this->assertSame('some_off', $rLevel(['on_air', 'ok', 'dead']));
 		$this->assertSame('healthy', $rLevel(['on_air', 'pending', 'skip']));
@@ -95,6 +98,14 @@ final class SourceAuditTest extends TestCase {
 		];
 		usort($rRows, [StreamHealth::class, 'compare']);
 		$this->assertSame(['C', 'B', 'A', 'D'], array_column($rRows, 'name'));          // worst level first; then the larger share off; then name
+
+		$rFirst = [
+			['name' => 'One ahead', 'health' => StreamHealth::assess(['dead', 'ok', 'ok', 'ok'])],
+			['name' => 'Mostly', 'health' => StreamHealth::assess(['ok', 'dead', 'dead', 'dead', 'ok'])],
+			['name' => 'Two ahead', 'health' => StreamHealth::assess(['down', 'dead', 'ok'])],
+		];
+		usort($rFirst, [StreamHealth::class, 'compare']);
+		$this->assertSame(['Two ahead', 'One ahead', 'Mostly'], array_column($rFirst, 'name'));  // a dead first source outranks a mostly-off list
 	}
 
 	public function testIntervalsOrderAndTheCapPerProvider(): void {

@@ -255,6 +255,7 @@ JS;
 
 	private const STREAM_LEVELS = [
 		'no_working' => ['No working source', 'table-danger', 'bg-label-danger', 'Every checked source is off and none is up: the stream has nothing to play.'],
+		'first_off'  => ['First source off', 'table-warning', 'bg-label-danger', 'The first source has priority: every start and restart tries it first, and a stream set to return to its first source keeps going back to it. Move it to the end.'],
 		'no_backup'  => ['No backup', 'table-warning', 'bg-label-warning', 'One source works and every other is off: the next drop has nothing to fall back to.'],
 		'mostly_off' => ['Half or more off', 'table-warning', 'bg-label-warning', 'Half or more of the sources are off.'],
 		'some_off'   => ['Some off', '', 'bg-label-info', 'Some sources are off; others work.'],
@@ -337,7 +338,8 @@ JS;
 			}
 			$rHtml .= '<tr class="' . $rRowClass . '"><td><a href="./stream?id=' . $s['id'] . '" target="_blank" rel="noopener">' . $h($s['name']) . '</a>'
 				. ' <a class="small text-muted" href="./source_health?id=' . $s['id'] . '" target="_blank" rel="noopener" title="Source Health report">&#8599;</a></td>'
-				. '<td><span class="badge ' . $rBadge . '" title="' . $h($rTitle) . '">' . $h($rLabel) . '</span></td>'
+				. '<td><span class="badge ' . $rBadge . '" title="' . $h($rTitle) . '">' . $h($rLabel) . '</span>'
+				. ($rHealth['level'] !== 'no_backup' && $rHealth['no_backup'] ? ' <span class="badge bg-label-warning" title="' . $h(self::STREAM_LEVELS['no_backup'][3]) . '">No backup</span>' : '') . '</td>'
 				. '<td style="white-space:nowrap">' . $rStrip . '</td>'
 				. '<td class="text-center">' . $rHealth['off'] . '<small class="text-muted">/' . $rHealth['total'] . '</small>'
 				. ($rHealth['off'] > 0 ? '<br><small class="text-muted">' . $rHealth['dead'] . ' dead · ' . $rHealth['down'] . ' down</small>' : '') . '</td>'

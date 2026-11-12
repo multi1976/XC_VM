@@ -9,6 +9,9 @@ namespace XcVm\Module\SourceHealth;
  * Levels, worst first:
  *   no_working  every checked source is off and none is up: the stream cannot
  *               start (or keep) a working source;
+ *   first_off   the first source is off while another works: the first source
+ *               has priority, so every start and restart tries it first (and a
+ *               stream set to return to its first source keeps going back to it);
  *   no_backup   one source works and every other is off: the next drop has
  *               nothing to fall back to;
  *   mostly_off  half or more of its sources are off;
@@ -16,11 +19,14 @@ namespace XcVm\Module\SourceHealth;
  *   healthy     none is off (not listed by default).
  */
 final class StreamHealth {
-	public const LEVELS = ['no_working', 'no_backup', 'mostly_off', 'some_off', 'healthy'];
+	public const LEVELS = ['no_working', 'first_off', 'no_backup', 'mostly_off', 'some_off', 'healthy'];
 
 	/**
+	 * A stream can be in more than one of these; `level` is the worst, and
+	 * `first_off` / `no_backup` say which apply.
+	 *
 	 * @param list<string> $rStatuses the audit state of each source, in list order: on_air, ok, dead, down, waiting, pending, skip
-	 * @return array{level:string, total:int, dead:int, down:int, off:int, working:int, unknown:int, first_working:?int, off_before_working:int, off_share:float}
+	 * @return array{level:string, first_off:bool, no_backup:bool, total:int, dead:int, down:int, off:int, working:int, unknown:int, first_working:?int, off_before_working:int, off_share:float}
 	 */
 	public static function assess(array $rStatuses): array {
 		$rCount = static fn (array $rWhich): int => count(array_filter($rStatuses, static fn (string $s): bool => in_array($s, $rWhich, true)));
@@ -41,22 +47,31 @@ final class StreamHealth {
 			}
 		}
 		$rShare = $rTotal > 0 ? $rOff / $rTotal : 0.0;
+		$rFirstOff = $rWorking > 0 && in_array($rStatuses[0] ?? '', ['dead', 'down'], true);
+		$rNoBackup = $rWorking === 1 && $rOff === $rTotal - 1;
 		$rLevel = match (true) {
-			$rOff === 0                    => 'healthy',
-			$rWorking === 0                => 'no_working',
-			$rWorking === 1 && $rOff === $rTotal - 1 => 'no_backup',
-			$rShare >= 0.5                 => 'mostly_off',
-			default                        => 'some_off',
+			$rOff === 0     => 'healthy',
+			$rWorking === 0 => 'no_working',
+			$rFirstOff      => 'first_off',
+			$rNoBackup      => 'no_backup',
+			$rShare >= 0.5  => 'mostly_off',
+			default         => 'some_off',
 		};
 		return [
-			'level' => $rLevel, 'total' => $rTotal, 'dead' => $rDead, 'down' => $rDown, 'off' => $rOff, 'working' => $rWorking,
+			'level' => $rLevel, 'first_off' => $rFirstOff, 'no_backup' => $rNoBackup, 'total' => $rTotal, 'dead' => $rDead, 'down' => $rDown, 'off' => $rOff, 'working' => $rWorking,
 			'unknown' => $rTotal - $rOff - $rWorking, 'first_working' => $rFirst, 'off_before_working' => $rFirst === null ? 0 : $rBefore, 'off_share' => $rShare,
 		];
 	}
 
-	/** Worst first: level, then the share of sources off, then how many, then name. */
+	/**
+	 * Worst first: level; then how many sources that are off sit ahead of the
+	 * first working one (each is a wait on every start); then the share off,
+	 * how many, and name.
+	 */
 	public static function compare(array $a, array $b): int {
-		return [array_search($a['health']['level'], self::LEVELS, true), -$a['health']['off_share'], -$a['health']['off'], $a['name']]
-			<=> [array_search($b['health']['level'], self::LEVELS, true), -$b['health']['off_share'], -$b['health']['off'], $b['name']];
+		$rKey = static fn (array $r): array => [
+			array_search($r['health']['level'], self::LEVELS, true), -$r['health']['off_before_working'], -$r['health']['off_share'], -$r['health']['off'], $r['name'],
+		];
+		return $rKey($a) <=> $rKey($b);
 	}
 }

@@ -199,7 +199,7 @@ final class SourceActions {
 	public static function history(int $rNow): array {
 		$rRows = self::db()->fetchAll(
 			'SELECT a.`batch`, MIN(a.`created_at`) AS `created_at`, MIN(a.`action`) AS `action`, COUNT(DISTINCT a.`stream_id`) AS `streams`, COUNT(*) AS `sources`, MAX(a.`undone_at`) AS `undone_at`, MIN(a.`user_id`) AS `user_id`
-			 FROM `source_health_actions` a WHERE a.`created_at` >= ? GROUP BY a.`batch` ORDER BY `created_at` DESC LIMIT 200', $rNow - self::UNDO_SEC
+			 FROM `source_health_actions` a WHERE a.`created_at` >= ? GROUP BY a.`batch` ORDER BY `created_at` DESC, MAX(a.`id`) DESC LIMIT 200', $rNow - self::UNDO_SEC
 		) ?: [];
 		return array_map(static fn (array $r): array => [
 			'batch' => (string) $r['batch'], 'created_at' => (int) $r['created_at'], 'action' => (string) $r['action'], 'user_id' => $r['user_id'] === null ? null : (int) $r['user_id'],
