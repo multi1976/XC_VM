@@ -115,13 +115,31 @@ final class LineAuditRepository {
 		return $rOut;
 	}
 
+	/**
+	 * Per line, the player families its sessions since $rFrom used, and how
+	 * many sessions each.
+	 *
+	 * @return array<int, array<string, int>> line id => family => sessions
+	 */
+	public static function players(int $rFrom): array {
+		$rOut = [];
+		foreach (self::db()->fetchAll('SELECT `user_id`, `user_agent`, COUNT(*) AS `n` FROM `lines_activity` WHERE `date_start` >= ? AND `user_id` > 0 GROUP BY `user_id`, `user_agent`', $rFrom) ?: [] as $rRow) {
+			$rFamily = LineAuditAnalyzer::playerFamily(self::raw((string) $rRow['user_agent']));
+			$rOut[(int) $rRow['user_id']][$rFamily] = ($rOut[(int) $rRow['user_id']][$rFamily] ?? 0) + (int) $rRow['n'];
+		}
+		foreach ($rOut as &$rFamilies) {
+			arsort($rFamilies);
+		}
+		return $rOut;
+	}
+
 	/** @param list<array<string, mixed>> $rSamples rows for line_audit_samples */
 	public static function saveSamples(array $rSamples): void {
 		foreach ($rSamples as $r) {
 			self::db()->query(
-				'INSERT INTO `line_audit_samples` (`sampled_at`, `user_id`, `conns`, `max_conn`, `ips`, `countries`, `isps`, `uas`, `country_list`, `isp_list`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+				'INSERT INTO `line_audit_samples` (`sampled_at`, `user_id`, `conns`, `max_conn`, `ips`, `countries`, `isps`, `uas`, `country_list`, `isp_list`, `ua_list`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
 				$r['sampled_at'], $r['user_id'], min(65535, $r['conns']), min(65535, $r['max_conn']), min(65535, $r['ips']), min(65535, $r['countries']),
-				min(65535, $r['isps']), min(65535, $r['uas']), mb_substr($r['country_list'], 0, 64), mb_substr($r['isp_list'], 0, 255)
+				min(65535, $r['isps']), min(65535, $r['uas']), mb_substr($r['country_list'], 0, 64), mb_substr($r['isp_list'], 0, 255), mb_substr($r['ua_list'] ?? '', 0, 255)
 			);
 		}
 	}
@@ -133,26 +151,27 @@ final class LineAuditRepository {
 	/**
 	 * Per line, its samples since $rFrom.
 	 *
-	 * @return array<int, array{samples:int, multi_ip:int, multi_country:int, at_limit:int, max_ips:int, max_countries:int, last_seen:int, country_list:string, isp_list:string}>
+	 * @return array<int, array{samples:int, multi_ip:int, multi_country:int, at_limit:int, max_ips:int, max_countries:int, max_uas:int, last_seen:int, country_list:string, isp_list:string, ua_list:string}>
 	 */
 	public static function sampleStats(int $rFrom): array {
 		$rOut = [];
 		$rRows = self::db()->fetchAll(
 			'SELECT `user_id`, COUNT(*) AS `samples`, SUM(`ips` >= 2) AS `multi_ip`, SUM(`countries` >= 2) AS `multi_country`,
-			        SUM(`max_conn` > 0 AND `conns` >= `max_conn`) AS `at_limit`, MAX(`ips`) AS `max_ips`, MAX(`countries`) AS `max_countries`, MAX(`sampled_at`) AS `last_seen`
+			        SUM(`max_conn` > 0 AND `conns` >= `max_conn`) AS `at_limit`, MAX(`ips`) AS `max_ips`, MAX(`countries`) AS `max_countries`, MAX(`uas`) AS `max_uas`, MAX(`sampled_at`) AS `last_seen`
 			 FROM `line_audit_samples` WHERE `sampled_at` >= ? GROUP BY `user_id`',
 			$rFrom
 		) ?: [];
 		foreach ($rRows as $rRow) {
 			$rOut[(int) $rRow['user_id']] = [
 				'samples' => (int) $rRow['samples'], 'multi_ip' => (int) $rRow['multi_ip'], 'multi_country' => (int) $rRow['multi_country'], 'at_limit' => (int) $rRow['at_limit'],
-				'max_ips' => (int) $rRow['max_ips'], 'max_countries' => (int) $rRow['max_countries'], 'last_seen' => (int) $rRow['last_seen'], 'country_list' => '', 'isp_list' => '',
+				'max_ips' => (int) $rRow['max_ips'], 'max_countries' => (int) $rRow['max_countries'], 'max_uas' => (int) $rRow['max_uas'], 'last_seen' => (int) $rRow['last_seen'],
+				'country_list' => '', 'isp_list' => '', 'ua_list' => '',
 			];
 		}
 		// The countries and ISPs of the widest sample of each line, for display.
 		if ($rOut !== []) {
 			$rWidest = self::db()->fetchAll(
-				'SELECT s.`user_id`, s.`country_list`, s.`isp_list` FROM `line_audit_samples` s
+				'SELECT s.`user_id`, s.`country_list`, s.`isp_list`, s.`ua_list` FROM `line_audit_samples` s
 				 JOIN (SELECT `user_id`, MAX(`ips` * 1000 + `countries`) AS `w` FROM `line_audit_samples` WHERE `sampled_at` >= ? GROUP BY `user_id`) m
 				   ON m.`user_id` = s.`user_id` AND s.`ips` * 1000 + s.`countries` = m.`w`
 				 WHERE s.`sampled_at` >= ?',
@@ -161,6 +180,7 @@ final class LineAuditRepository {
 			foreach ($rWidest as $rRow) {
 				$rOut[(int) $rRow['user_id']]['country_list'] = self::raw((string) $rRow['country_list']);
 				$rOut[(int) $rRow['user_id']]['isp_list'] = self::raw((string) $rRow['isp_list']);
+				$rOut[(int) $rRow['user_id']]['ua_list'] = self::raw((string) $rRow['ua_list']);
 			}
 		}
 		return $rOut;

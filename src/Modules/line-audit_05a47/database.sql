@@ -2,7 +2,8 @@
 
 -- What the live connections of a line looked like, every five minutes, for the
 -- lines worth a look: two connections or more, or at their limit. IP addresses
--- are not kept: only how many distinct ones, and the countries and ISPs.
+-- are not kept: only how many distinct ones, the countries and ISPs, and the
+-- player families (uas counts families, not raw user agents).
 CREATE TABLE IF NOT EXISTS `line_audit_samples` (
   `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
   `sampled_at` int(11) NOT NULL,
@@ -15,6 +16,7 @@ CREATE TABLE IF NOT EXISTS `line_audit_samples` (
   `uas` smallint(5) unsigned NOT NULL,
   `country_list` varchar(64) NOT NULL DEFAULT '',
   `isp_list` varchar(255) NOT NULL DEFAULT '',
+  `ua_list` varchar(255) NOT NULL DEFAULT '',
   PRIMARY KEY (`id`),
   KEY `sampled_at` (`sampled_at`),
   KEY `user_sampled` (`user_id`, `sampled_at`)

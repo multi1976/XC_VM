@@ -9,8 +9,53 @@ namespace XcVm\Module\LineAudit;
  * countries is the strongest sign (a line cannot be in two countries at once);
  * several IPs at the same time, many countries, ISPs or IPs over a day add to
  * it. A restreamer is expected to look like this and is judged apart.
+ *
+ * Players: user agents are grouped into families (all versions of TiviMate are
+ * one), since a household with a TV, a phone and a tablet legitimately shows
+ * two or three; many families, or several at once, add to the score. A
+ * restreaming tool (ffmpeg/Lavf, curl, wget, a script) on a line that is not a
+ * restreamer is a strong sign on its own.
  */
 final class LineAuditAnalyzer {
+	/** User agent => player family, first match wins. */
+	private const PLAYER_FAMILIES = [
+		'~lavf|libavformat|ffmpeg|ffprobe~i'         => 'ffmpeg / Lavf',
+		'~^curl/~i'                                  => 'curl',
+		'~^wget/~i'                                  => 'wget',
+		'~python-requests|python-urllib|aiohttp~i'   => 'Python script',
+		'~^go-http-client~i'                         => 'Go script',
+		'~^(java/|apache-httpclient)~i'              => 'Java client',
+		'~tivimate~i'                                => 'TiviMate',
+		'~smarters~i'                                => 'IPTV Smarters',
+		'~ott ?navigator~i'                          => 'OTT Navigator',
+		'~perfect ?player~i'                         => 'Perfect Player',
+		'~kodi|xbmc~i'                               => 'Kodi',
+		'~\bvlc\b|libvlc~i'                        => 'VLC',
+		'~\bgse\b~i'                               => 'GSE Smart IPTV',
+		'~mag ?\d{3}|stbapp|infomir~i'              => 'MAG box',
+		'~enigma2|gstreamer|dreambox|vu\+~i'        => 'Enigma2',
+		'~applecoremedia|appletv|tvos~i'             => 'Apple player',
+		'~exoplayer|okhttp|dalvik~i'                 => 'Android player',
+		'~smart-?tv|tizen|webos|netcast|hbbtv~i'     => 'Smart TV',
+		'~chrome|firefox|safari|edg/|opera~i'        => 'Web browser',
+	];
+	/** Families that are tools, not players: what restreaming uses. */
+	public const TOOLS = ['ffmpeg / Lavf', 'curl', 'wget', 'Python script', 'Go script', 'Java client'];
+
+	/** The player family of a user agent ("(none)" when it sends none). */
+	public static function playerFamily(string $rUserAgent): string {
+		$rUserAgent = trim($rUserAgent);
+		if ($rUserAgent === '') {
+			return '(none)';
+		}
+		foreach (self::PLAYER_FAMILIES as $rPattern => $rFamily) {
+			if (preg_match($rPattern, $rUserAgent) === 1) {
+				return $rFamily;
+			}
+		}
+		return 'Other';
+	}
+
 	/** Samples are taken every five minutes: a sample stands for that long. */
 	public const SAMPLE_SEC = 300;
 
@@ -20,7 +65,9 @@ final class LineAuditAnalyzer {
 	 *
 	 * @param list<array{user_id:int, ip:string, country:string, isp:string, ua:string}> $rConnections
 	 * @param array<int, array<string, mixed>> $rLines line id => line (max_connections)
-	 * @return list<array{sampled_at:int, user_id:int, conns:int, max_conn:int, ips:int, countries:int, isps:int, uas:int, country_list:string, isp_list:string}>
+	 * `uas` counts player families, not raw user agents (ua_list names them).
+	 *
+	 * @return list<array{sampled_at:int, user_id:int, conns:int, max_conn:int, ips:int, countries:int, isps:int, uas:int, country_list:string, isp_list:string, ua_list:string}>
 	 */
 	public static function samples(array $rConnections, array $rLines, int $rNow): array {
 		$rBy = [];
@@ -35,14 +82,16 @@ final class LineAuditAnalyzer {
 				continue;
 			}
 			$rDistinct = static fn (string $k): array => array_values(array_unique(array_filter(array_column($rList, $k), static fn ($v): bool => $v !== '')));
+			$rPlayers = array_values(array_unique(array_map([self::class, 'playerFamily'], array_column($rList, 'ua'))));
+			sort($rPlayers);
 			$rCountries = $rDistinct('country');
 			$rIsps = $rDistinct('isp');
 			sort($rCountries);
 			sort($rIsps);
 			$rOut[] = [
 				'sampled_at' => $rNow, 'user_id' => (int) $rUserID, 'conns' => $rConns, 'max_conn' => $rMax,
-				'ips' => count($rDistinct('ip')), 'countries' => count($rCountries), 'isps' => count($rIsps), 'uas' => count($rDistinct('ua')),
-				'country_list' => implode(',', $rCountries), 'isp_list' => implode(' | ', $rIsps),
+				'ips' => count($rDistinct('ip')), 'countries' => count($rCountries), 'isps' => count($rIsps), 'uas' => count($rPlayers),
+				'country_list' => implode(',', $rCountries), 'isp_list' => implode(' | ', $rIsps), 'ua_list' => implode(', ', $rPlayers),
 			];
 		}
 		return $rOut;
@@ -53,11 +102,17 @@ final class LineAuditAnalyzer {
 	 *
 	 * @param array{samples:int, multi_ip:int, multi_country:int, max_ips:int, max_countries:int}|null $rSamples five-minute samples (concurrent use)
 	 * @param array{ips:int, countries:int, isps:int}|null $rHistory sessions in the window
+	 * @param array<string, int> $rPlayers player family => sessions in the window
 	 * @return array{score:int, level:string, reasons:list<string>}
 	 */
-	public static function sharing(?array $rSamples, ?array $rHistory): array {
+	public static function sharing(?array $rSamples, ?array $rHistory, array $rPlayers = []): array {
 		$rScore = 0;
 		$rWhy = [];
+		$rTools = array_values(array_intersect(array_keys($rPlayers), self::TOOLS));
+		if ($rTools !== []) {
+			$rScore += 3;
+			$rWhy[] = 'a restreaming tool or an ffmpeg-based player (' . implode(', ', $rTools) . ')';
+		}
 		if ($rSamples !== null && $rSamples['multi_country'] > 0) {
 			$rScore += 3;
 			$rWhy[] = 'from ' . $rSamples['max_countries'] . ' countries at the same time (' . self::duration($rSamples['multi_country'] * self::SAMPLE_SEC) . ')';
@@ -65,6 +120,15 @@ final class LineAuditAnalyzer {
 		if ($rSamples !== null && $rSamples['multi_ip'] >= 3) {
 			$rScore += 2;
 			$rWhy[] = 'from up to ' . $rSamples['max_ips'] . ' IPs at the same time (' . self::duration($rSamples['multi_ip'] * self::SAMPLE_SEC) . ')';
+		}
+		if ($rSamples !== null && ($rSamples['max_uas'] ?? 0) >= 3) {
+			$rScore += 1;
+			$rWhy[] = $rSamples['max_uas'] . ' different players at the same time';
+		}
+		$rFamilies = array_values(array_diff(array_keys($rPlayers), ['(none)', 'Other']));
+		if (count($rFamilies) >= 4) {
+			$rScore += 1;
+			$rWhy[] = count($rFamilies) . ' different players';
 		}
 		if ($rHistory !== null && $rHistory['countries'] >= 2) {
 			$rScore += 2;

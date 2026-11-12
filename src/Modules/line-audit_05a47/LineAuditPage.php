@@ -30,6 +30,7 @@ final class LineAuditPage {
 		$rHistory = LineAuditRepository::history($rFrom);
 		$rSamples = LineAuditRepository::sampleStats($rFrom);
 		$rRefusals = LineAuditRepository::refusals($rFrom);
+		$rPlayers = LineAuditRepository::players($rFrom);
 		$rOwners = LineAuditRepository::owners(array_column($rLines, 'member_id'));
 		$rKeep = static fn (array $l): bool => ($rReseller === 0 || (int) $l['member_id'] === $rReseller)
 			&& ($rSearch === '' || mb_stripos((string) $l['username'], $rSearch) !== false);
@@ -38,7 +39,7 @@ final class LineAuditPage {
 		// Findings, per tab.
 		$rSharing = [];
 		foreach ($rScope as $rID => $l) {
-			$s = LineAuditAnalyzer::sharing($rSamples[$rID] ?? null, $rHistory[$rID] ?? null);
+			$s = LineAuditAnalyzer::sharing($rSamples[$rID] ?? null, $rHistory[$rID] ?? null, $rPlayers[$rID] ?? []);
 			if ($s['level'] !== 'none') {
 				$rSharing[$rID] = $s;
 			}
@@ -88,7 +89,7 @@ final class LineAuditPage {
 			. '<button class="btn btn-sm btn-primary" type="submit">Apply</button>'
 			. '<small class="text-muted ms-2">' . count($rScope) . ' lines · ' . array_sum(array_intersect_key($rLive, $rScope)) . ' connections now</small></form>';
 
-		$rCtx = ['lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
+		$rCtx = ['players' => $rPlayers, 'lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
 		return $rHtml . match ($rView) {
 			'sharing'  => self::sharingTab($rSharing, $rCtx),
 			'limits'   => self::limitsTab($rLimits, $rCtx),
@@ -177,7 +178,7 @@ final class LineAuditPage {
 		if ($rSharing === []) {
 			return $rHtml . '<p class="text-muted mb-0">Nothing found.</p>';
 		}
-		$rHtml .= self::head(['Verdict', 'Why', 'Countries', 'ISPs (widest moment)', 'Sessions']);
+		$rHtml .= self::head(['Verdict', 'Why', 'Countries', 'ISPs (widest moment)', 'Players', 'Sessions']);
 		foreach (array_slice($rSharing, 0, self::MAX_ROWS, true) as $rID => $s) {
 			$l = $rCtx['lines'][$rID];
 			$rHist = $rCtx['history'][$rID] ?? null;
@@ -195,6 +196,7 @@ final class LineAuditPage {
 				. '<td><small>' . $h(implode('; ', $s['reasons'])) . '</small></td>'
 				. '<td><small>' . $h(trim(($rSam['country_list'] ?? '') !== '' ? $rSam['country_list'] : ($rHist['country_list'] ?? ''), ',')) . '</small></td>'
 				. '<td><small class="text-muted">' . $h(mb_strimwidth((string) ($rSam['isp_list'] ?? ''), 0, 90, '…')) . '</small></td>'
+				. '<td><small>' . self::players($rCtx['players'][$rID] ?? [], (string) ($rSam['ua_list'] ?? '')) . '</small></td>'
 				. '<td class="text-center">' . (int) ($rHist['sessions'] ?? 0) . '</td></tr>';
 		}
 		return $rHtml . self::tail(count($rSharing));
@@ -291,6 +293,24 @@ final class LineAuditPage {
 				. '<td>' . LineAuditAnalyzer::duration($rHist['watched']) . '</td></tr>';
 		}
 		return $rHtml . self::tail(count($rUnstable));
+	}
+
+	/**
+	 * The player families of a line: those of its sessions in the window (with
+	 * how many each), else those seen live; restreaming tools in red.
+	 *
+	 * @param array<string, int> $rFamilies
+	 */
+	private static function players(array $rFamilies, string $rLive): string {
+		if ($rFamilies === [] && $rLive !== '') {
+			$rFamilies = array_fill_keys(array_map('trim', explode(',', $rLive)), 0);
+		}
+		$rOut = [];
+		foreach ($rFamilies as $rFamily => $n) {
+			$rText = htmlspecialchars((string) $rFamily, ENT_QUOTES) . ($n > 0 ? ' <span class="text-muted">' . $n . '</span>' : '');
+			$rOut[] = in_array($rFamily, LineAuditAnalyzer::TOOLS, true) ? '<span class="text-danger fw-semibold">' . $rText . '</span>' : $rText;
+		}
+		return implode(', ', $rOut);
 	}
 
 	private static function ago(int $rTime, int $rNow): string {

@@ -3,7 +3,7 @@
     "title": "Line Audit",
     "hash_id": "05a47aa824246b74ea09918bb0a39cae",
     "description": "Audit of user lines: shared accounts, connection limits, refused connections, expiring and unused lines, unstable clients. Read-only.",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "requires_core": "",
     "environment": "main",
     "priority": 0,

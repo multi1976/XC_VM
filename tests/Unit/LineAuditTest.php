@@ -25,20 +25,20 @@ final class LineAuditTest extends TestCase {
 		}
 	}
 
-	private static function conn(int $rUser, string $rIP, string $rCountry, string $rIsp = 'ISP A'): array {
-		return ['user_id' => $rUser, 'ip' => $rIP, 'country' => $rCountry, 'isp' => $rIsp, 'ua' => 'VLC', 'stream_id' => 1, 'server_id' => 1, 'date_start' => 0];
+	private static function conn(int $rUser, string $rIP, string $rCountry, string $rIsp = 'ISP A', string $rUA = 'VLC/3.0.18 LibVLC/3.0.18'): array {
+		return ['user_id' => $rUser, 'ip' => $rIP, 'country' => $rCountry, 'isp' => $rIsp, 'ua' => $rUA, 'stream_id' => 1, 'server_id' => 1, 'date_start' => 0];
 	}
 
 	public function testOnlyLinesWorthALookAreSampledAndNoIPIsKept(): void {
 		$rConns = [
-			self::conn(1, '10.0.0.1', 'AL'), self::conn(1, '10.0.0.2', 'IT', 'ISP B'), self::conn(1, '10.0.0.2', 'IT', 'ISP B'),
+			self::conn(1, '10.0.0.1', 'AL'), self::conn(1, '10.0.0.2', 'IT', 'ISP B', 'TiviMate/4.7.0'), self::conn(1, '10.0.0.2', 'IT', 'ISP B', 'TiviMate/5.0.4'),
 			self::conn(2, '10.0.0.3', 'AL'),                                     // one connection, limit 1: at its limit
 			self::conn(3, '10.0.0.4', 'AL'),                                     // one connection, limit 2: nothing to see
 		];
 		$rLines = [1 => ['max_connections' => 3], 2 => ['max_connections' => 1], 3 => ['max_connections' => 2]];
 		$rSamples = LineAuditAnalyzer::samples($rConns, $rLines, 1000);
 		$this->assertSame([1, 2], array_column($rSamples, 'user_id'));
-		$this->assertSame(['sampled_at' => 1000, 'user_id' => 1, 'conns' => 3, 'max_conn' => 3, 'ips' => 2, 'countries' => 2, 'isps' => 2, 'uas' => 1, 'country_list' => 'AL,IT', 'isp_list' => 'ISP A | ISP B'], $rSamples[0]);
+		$this->assertSame(['sampled_at' => 1000, 'user_id' => 1, 'conns' => 3, 'max_conn' => 3, 'ips' => 2, 'countries' => 2, 'isps' => 2, 'uas' => 2, 'country_list' => 'AL,IT', 'isp_list' => 'ISP A | ISP B', 'ua_list' => 'TiviMate, VLC'], $rSamples[0]);   // two TiviMate versions are one player
 		$this->assertStringNotContainsString('10.0.0', json_encode($rSamples));
 	}
 
@@ -52,6 +52,23 @@ final class LineAuditTest extends TestCase {
 		$this->assertSame('none', $rHomeAndPhone['level']);
 		$this->assertSame('suspicious', LineAuditAnalyzer::sharing(null, ['ips' => 4, 'countries' => 2, 'isps' => 2])['level']);
 		$this->assertSame('note', LineAuditAnalyzer::sharing(null, ['ips' => 12, 'countries' => 1, 'isps' => 1])['level']);
+
+		// Players: families, not versions; a restreaming tool weighs on its own.
+		foreach (['TiviMate/4.7.0' => 'TiviMate', 'IPTVSmartersPlayer' => 'IPTV Smarters', 'Lavf/58.76.100' => 'ffmpeg / Lavf', 'curl/8.5.0' => 'curl',
+			'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3' => 'MAG box',
+			'Kodi/20.2 (Linux; Android 11)' => 'Kodi', 'ExoPlayerLib/2.18.1' => 'Android player', '' => '(none)', 'SomethingNew/1.0' => 'Other'] as $rUA => $rFamily) {
+			$this->assertSame($rFamily, LineAuditAnalyzer::playerFamily($rUA), $rUA);
+		}
+		$rTool = LineAuditAnalyzer::sharing(null, ['ips' => 1, 'countries' => 1, 'isps' => 1], ['ffmpeg / Lavf' => 40]);
+		$this->assertSame('suspicious', $rTool['level']);
+		$this->assertStringContainsString('ffmpeg / Lavf', $rTool['reasons'][0]);
+		$rFamily = LineAuditAnalyzer::sharing(null, ['ips' => 2, 'countries' => 1, 'isps' => 1], ['TiviMate' => 9, 'IPTV Smarters' => 3, 'Smart TV' => 2]);
+		$this->assertSame('none', $rFamily['level']);                                              // a TV, a phone and a tablet at home
+		$rMany = LineAuditAnalyzer::sharing(['samples' => 5, 'multi_ip' => 3, 'multi_country' => 0, 'max_ips' => 3, 'max_countries' => 1, 'max_uas' => 3], ['ips' => 4, 'countries' => 1, 'isps' => 3],
+			['TiviMate' => 9, 'IPTV Smarters' => 3, 'VLC' => 2, 'Kodi' => 1, 'Other' => 4]);
+		$this->assertSame('likely', $rMany['level']);
+		$this->assertContains('3 different players at the same time', $rMany['reasons']);
+		$this->assertContains('4 different players', $rMany['reasons']);
 
 		$this->assertTrue(LineAuditAnalyzer::unstable(['sessions' => 30, 'short' => 22]));
 		$this->assertFalse(LineAuditAnalyzer::unstable(['sessions' => 100, 'short' => 22]));     // short ones are a minority
@@ -88,7 +105,8 @@ final class LineAuditTest extends TestCase {
 			}
 			$rDb->query("INSERT INTO `lines_logs` (`user_id`, `stream_id`, `client_status`, `ip`, `date`) VALUES (4, 1, 'USER_EXPIRED', '10.2.2.2', ?), (4, 1, 'USER_EXPIRED', '10.2.2.2', ?), (1, 1, 'COUNTRY_DISALLOW', '10.9.9.9', ?)", $rNow - 60, $rNow - 50, $rNow - 40);
 
-			$this->assertSame([1 => ['samples' => 2, 'multi_ip' => 2, 'multi_country' => 2, 'at_limit' => 2, 'max_ips' => 2, 'max_countries' => 2, 'last_seen' => $rNow + 300, 'country_list' => 'AL,IT', 'isp_list' => 'ISP A | ISP B']], LineAuditRepository::sampleStats($rNow - 86400));
+			$this->assertSame([1 => ['samples' => 2, 'multi_ip' => 2, 'multi_country' => 2, 'at_limit' => 2, 'max_ips' => 2, 'max_countries' => 2, 'max_uas' => 2, 'last_seen' => $rNow + 300, 'country_list' => 'AL,IT', 'isp_list' => 'ISP A | ISP B', 'ua_list' => 'IPTV Smarters, VLC']], LineAuditRepository::sampleStats($rNow - 86400));
+			$this->assertSame([5 => ['VLC' => 25]], LineAuditRepository::players($rNow - 86400));
 
 			$rView = static fn (string $v, array $q = []): string => LineAuditPage::render(['view' => $v] + $q, $rNow + 300);
 			$rSharing = $rView('sharing');
@@ -96,6 +114,7 @@ final class LineAuditTest extends TestCase {
 			$this->assertStringContainsString('2 countries at the same time', $rSharing);
 			$this->assertStringContainsString('AL,IT', $rSharing);
 			$this->assertStringNotContainsString('10.9.9.9', $rSharing);
+			$this->assertStringContainsString('IPTV Smarters, VLC', $rSharing);                      // players seen live
 			$this->assertStringContainsString('>shared</a>', $rView('limits'));
 			$rRefused = $rView('refused');
 			$this->assertStringContainsString('USER_EXPIRED 2', $rRefused);
