@@ -42,6 +42,7 @@ final class SourceHealthTab {
 			$rRecent = array_column(SourceHealthCalculator::compute($rSources, $rEvents, $rDayFrom, $rNow, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rDayFrom, $rDrops)), null, 'index');
 			$rProbing = SourceHealthRepository::probeEnabled($rStreamID);
 			$rAccounts = SourceHealthRepository::accountConnections();
+			$rAccountInfo = SourceHealthRepository::accounts();
 			$rErrors = SourceHealthCalculator::errorsBySource($rSources, $rEvents, SourceHealthRepository::errors($rStreamID, $rFrom), 120, SourceHealthRepository::hosts($rStreamID, 0));
 			$rProfiles = SourceHealthRepository::profiles($rStreamID);
 		} catch (\Throwable $e) {
@@ -50,7 +51,7 @@ final class SourceHealthTab {
 		}
 
 		$rOpen = $rFullPage ? '' : '<p class="mb-2"><a href="./source_health?id=' . (int) $rStream['id'] . '" target="_blank" rel="noopener">Open this report as a full page ↗</a></p>';
-		return $rOpen . self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow, $rAccounts) . self::timeline($rRows, $rFrom, $rNow) . self::runSection($rRows) . self::errorSection($rRows, $rErrors);
+		return $rOpen . self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow, $rAccounts, $rAccountInfo) . self::timeline($rRows, $rFrom, $rNow) . self::runSection($rRows) . self::errorSection($rRows, $rErrors);
 	}
 
 	/**
@@ -253,7 +254,7 @@ final class SourceHealthTab {
 	 * @param array<string, array<string, mixed>> $rProfiles
 	 */
 	/** @param array<int, array<string, mixed>> $rRecent compute() over the last 24 h, keyed by source index */
-	private static function table(array $rRows, array $rRecent, array $rProfiles, int $rFrom, int $rNow, array $rAccounts = []): string {
+	private static function table(array $rRows, array $rRecent, array $rProfiles, int $rFrom, int $rNow, array $rAccounts = [], array $rAccountInfo = []): string {
 		$rOrder = SourceHealthCalculator::suggestedOrder($rRows);
 		$rByIndex = array_column($rRows, null, 'index');
 
@@ -292,7 +293,7 @@ final class SourceHealthTab {
 			$rHtml .= '<tr>'
 				. '<td>' . ((int) $rRow['index'] + 1) . ($rRow['running'] ? '<br><span class="badge bg-label-success" title="On air now">live</span>' : '') . '</td>'
 				. '<td><code title="' . $h(self::mask($rRow['source'])) . '">' . $h(self::mask($rRow['source'])) . '</code><br><small class="text-muted">' . $rProfileText . '</small>'
-					. self::accountNote($rRow, $rAccounts) . '</td>'
+					. self::accountNote($rRow, $rAccounts, $rAccountInfo) . '</td>'
 				. '<td class="text-center">' . self::scoreBadge($rRow['score'], (string) $rRow['confidence']) . '</td>'
 				. '<td class="text-center">' . self::recent($rRecent[$rRow['index']] ?? null) . '</td>'
 				. '<td class="text-center">' . self::probes($rRow['probe'] ?? null) . '</td>'
@@ -329,13 +330,21 @@ final class SourceHealthTab {
 	 * Providers cap connections per account; past the cap they cut the oldest
 	 * ("source ended") and refuse new ones (404, an empty body, a web page).
 	 */
-	private static function accountNote(array $rRow, array $rAccounts): string {
+	private static function accountNote(array $rRow, array $rAccounts, array $rInfo = []): string {
 		$rKey = SourceProber::accountKey((string) $rRow['source']);
-		$rOthers = $rKey === null ? 0 : (int) ($rAccounts[$rKey] ?? 0) - ($rRow['running'] ? 1 : 0);
-		if ($rOthers <= 0) {
-			return '';
+		$rOurs = $rKey === null ? 0 : (int) ($rAccounts[$rKey] ?? 0);
+		$rOthers = $rOurs - ($rRow['running'] ? 1 : 0);
+		$rHtml = $rOthers > 0
+			? '<br><small class="text-warning" title="Live connections the panel holds right now on the same provider account (host + user/pass), other than this source">account also used by ' . $rOthers . ' other live connection(s)</small>'
+			: '';
+		$rAcct = $rKey !== null ? ($rInfo[md5($rKey)] ?? null) : null;
+		// A backup that is not on air would take one connection more when started.
+		$rCrowd = ProviderAccount::contention($rOurs + ($rRow['running'] ? 0 : 1), $rAcct);
+		if ($rCrowd !== null && ($rOthers > 0 || $rCrowd['level'] === 'shared')) {
+			$rHtml .= '<br><small class="text-danger fw-semibold" title="What the provider\'s API reports for this account: ' . (int) $rAcct['active'] . ' connection(s) in use of ' . (int) $rAcct['max'] . '">'
+				. htmlspecialchars(($rRow['running'] ? '' : 'started, ') . $rCrowd['text'], ENT_QUOTES) . '</small>';
 		}
-		return '<br><small class="text-warning" title="Live connections the panel holds right now on the same provider account (host + user/pass), other than this source">account also used by ' . $rOthers . ' other live connection(s)</small>';
+		return $rHtml;
 	}
 
 	/** Last-24h cell: score and incident count, or "–" when the source was not tried. */

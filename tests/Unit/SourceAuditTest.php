@@ -108,6 +108,17 @@ final class SourceAuditTest extends TestCase {
 		$this->assertSame(['Two ahead', 'One ahead', 'Mostly'], array_column($rFirst, 'name'));  // a dead first source outranks a mostly-off list
 	}
 
+	public function testStreamsThatCrowdAnAccountAreTold(): void {
+		$rInfo = static fn (int $rMax, int $rActive): array => ['api' => true, 'auth' => true, 'status' => 'Active', 'max' => $rMax, 'active' => $rActive, 'exp' => null];
+		$this->assertSame('over', ProviderAccount::contention(2, $rInfo(1, 1))['level']);         // two streams, one connection: they cut each other off
+		$this->assertSame('full', ProviderAccount::contention(2, $rInfo(2, 2))['level']);
+		$rShared = ProviderAccount::contention(1, $rInfo(2, 2));                                   // one of ours, one from elsewhere
+		$this->assertSame('shared', $rShared['level']);
+		$this->assertStringContainsString('1 of them not from this panel', $rShared['text']);
+		$this->assertNull(ProviderAccount::contention(2, $rInfo(50, 8)));                          // room to spare
+		$this->assertNull(ProviderAccount::contention(3, ['api' => false, 'max' => null, 'active' => null]));
+	}
+
 	public function testIntervalsOrderAndTheCapPerProvider(): void {
 		$rSources = [];
 		foreach (range(1, 8) as $i) {

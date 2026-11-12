@@ -194,7 +194,15 @@ final class SourceAuditPage {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rFound = ProviderImport::discover();
 		$rInfo = SourceHealthRepository::accounts();
-		uasort($rFound, static fn (array $a, array $b): int => [$a['provider'] !== null, $a['host'], $a['user']] <=> [$b['provider'] !== null, $b['host'], $b['user']]);
+		$rOurs = SourceHealthRepository::accountConnections();
+		$rCrowd = [];
+		foreach ($rFound as $rHash => $rAcct) {
+			$rCrowd[$rHash] = ProviderAccount::contention((int) ($rOurs[$rAcct['key']] ?? 0), $rInfo[$rHash] ?? null);
+		}
+		// Crowded accounts first: they are what knocks streams off.
+		uasort($rFound, static fn (array $a, array $b): int => [$rCrowd[md5($a['key'])] === null, $a['provider'] !== null, $a['host'], $a['user']]
+			<=> [$rCrowd[md5($b['key'])] === null, $b['provider'] !== null, $b['host'], $b['user']]);
+		$rCrowded = count(array_filter($rCrowd));
 		$rNew = array_keys(array_filter($rFound, static fn (array $a): bool => $a['provider'] === null));
 		$rHtml = '<p class="text-muted small">The provider accounts found in the sources of live streams (Xtream-style URLs: host, port, username, password). '
 			. 'An account added here becomes a Stream Provider exactly as through <em>Add Provider</em>: the core then fetches its details and channel lists every hour, '
@@ -209,9 +217,12 @@ final class SourceAuditPage {
 			. '<button type="button" class="btn btn-sm btn-primary" id="sa-add-selected" disabled>Add selected to Stream Providers</button>'
 			. ($rNew !== [] ? '<button type="button" class="btn btn-sm btn-outline-primary" id="sa-add-all" data-hashes="' . $h(json_encode($rNew)) . '">Add all not yet added (' . count($rNew) . ')</button>' : '')
 			. '<label class="small ms-2"><input type="checkbox" id="sa-add-enabled" checked> enabled (hourly sync)</label>'
-			. '<span class="small text-muted ms-auto">' . count($rFound) . ' accounts · ' . (count($rFound) - count($rNew)) . ' already Stream Providers</span></div>'
+			. '<span class="small text-muted ms-auto">' . count($rFound) . ' accounts · ' . (count($rFound) - count($rNew)) . ' already Stream Providers'
+			. ($rCrowded > 0 ? ' · <span class="text-danger fw-semibold">' . $rCrowded . ' crowded</span>' : '') . '</span></div>'
+			. ($rCrowded > 0 ? '<div class="alert alert-danger small py-2">' . $rCrowded . ' account(s) have no connection to spare for the streams on them (listed first): providers cut a connection or refuse the next one past their limit, '
+				. 'so streams sharing such an account knock each other off. Give the streams accounts of their own, raise the limit with the provider, or move such backups after sources on other accounts.</div>' : '')
 			. '<div class="table-responsive"><table class="table table-sm"><thead><tr><th><input type="checkbox" id="sa-all"></th><th>Host</th><th>Port</th><th>User</th><th>Provider API</th>'
-			. '<th class="text-center">Connections</th><th>Expires</th><th class="text-center">Sources</th><th class="text-center">Streams</th><th>Stream Provider</th></tr></thead><tbody>';
+			. '<th class="text-center">Connections</th><th class="text-center" title="Live connections this panel holds on the account right now">This panel</th><th>Expires</th><th class="text-center">Sources</th><th class="text-center">Streams</th><th>Stream Provider</th></tr></thead><tbody>';
 		foreach ($rFound as $rHash => $rAcct) {
 			$rApi = $rInfo[$rHash] ?? null;
 			$rDead = ProviderAccount::deadReason($rApi, $rNow);
@@ -221,6 +232,8 @@ final class SourceAuditPage {
 				. '<td><small>' . ($rApi === null ? '<span class="text-muted">not asked yet</span>' : (!$rApi['api'] ? '<span class="text-muted">no answer</span>'
 					: ($rDead !== null ? '<span class="text-danger">' . $h(substr($rDead, 9)) . '</span>' : '<span class="text-success">' . $h($rApi['status'] ?: 'active') . '</span>'))) . '</small></td>'
 				. '<td class="text-center"><small>' . ($rApi !== null && $rApi['api'] && $rApi['max'] !== null ? (int) $rApi['active'] . ' / ' . (int) $rApi['max'] : '–') . '</small></td>'
+				. '<td class="text-center"><small>' . (int) ($rOurs[$rAcct['key']] ?? 0) . '</small>'
+				. ($rCrowd[$rHash] !== null ? '<br><span class="badge bg-label-danger text-wrap" title="' . $h($rCrowd[$rHash]['text']) . '">' . $h(match ($rCrowd[$rHash]['level']) { 'over' => 'over the limit', 'full' => 'full', default => 'full: shared' }) . '</span>' : '') . '</td>'
 				. '<td><small>' . ($rApi !== null && $rApi['exp'] !== null ? $h(date('Y-m-d', $rApi['exp'])) : '–') . '</small></td>'
 				. '<td class="text-center">' . (int) $rAcct['sources'] . '</td><td class="text-center">' . count($rAcct['streams']) . '</td>'
 				. '<td>' . ($rAcct['provider'] !== null

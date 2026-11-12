@@ -91,6 +91,30 @@ final class ProviderAccount {
 	}
 
 	/**
+	 * Whether this panel's own streams crowd a provider account: providers cap
+	 * connections per account, and past the cap they cut a connection or refuse
+	 * the next one, so streams on one account knock each other off ("source
+	 * idle", "use of closed network connection", "source ended", 404, an empty
+	 * body). $rOurs is how many live connections this panel holds on it.
+	 *
+	 * @param array{api:bool, max:?int, active:?int}|null $rAcct
+	 * @return array{level:string, text:string}|null over | full | shared, or null when there is room or nothing is known
+	 */
+	public static function contention(int $rOurs, ?array $rAcct): ?array {
+		if ($rAcct === null || !$rAcct['api'] || $rAcct['max'] === null || $rAcct['max'] <= 0) {
+			return null;
+		}
+		$rMax = $rAcct['max'];
+		$rActive = (int) ($rAcct['active'] ?? 0);
+		return match (true) {
+			$rOurs > $rMax   => ['level' => 'over', 'text' => 'your streams hold ' . $rOurs . ' connections on an account allowed ' . $rMax . ': they cut each other off'],
+			$rOurs === $rMax => ['level' => 'full', 'text' => 'your streams use all ' . $rMax . ' connection(s) of the account: a restart, or a backup on it, is refused or cuts one'],
+			$rActive >= $rMax => ['level' => 'shared', 'text' => 'the account is full (' . $rActive . '/' . $rMax . '), ' . max(0, $rActive - $rOurs) . ' of them not from this panel: something else uses it too'],
+			default          => null,
+		};
+	}
+
+	/**
 	 * May a check take one connection on an account a live stream is using?
 	 * Only on fresh word from the provider that a connection is free beyond
 	 * the check's own (and SPARE more).
