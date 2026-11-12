@@ -22,7 +22,6 @@ final class ProviderAccount {
 	public const REFRESH_SEC = 6 * 3600;
 	/** Connections kept free beyond the check's own: providers count a closed connection for a few seconds more. */
 	public const SPARE = 1;
-	private const KINDS = ['live', 'movie', 'series', 'timeshift', 'hls', 'play'];
 
 	/** @return array{key:string, host:string, base:string, user:string, pass:string}|null */
 	public static function parse(string $rUrl): ?array {
@@ -31,7 +30,7 @@ final class ProviderAccount {
 			return null;
 		}
 		$rSegs = array_values(array_filter(explode('/', (string) ($rParts['path'] ?? '')), static fn (string $s): bool => $s !== ''));
-		if (count($rSegs) >= 4 && in_array(strtolower($rSegs[0]), self::KINDS, true)) {
+		if (count($rSegs) >= 4 && in_array(strtolower($rSegs[0]), SourceProber::KINDS, true)) {
 			[$rUser, $rPass] = [$rSegs[1], $rSegs[2]];
 		} elseif (count($rSegs) === 3) {
 			[$rUser, $rPass] = [$rSegs[0], $rSegs[1]];

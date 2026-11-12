@@ -26,7 +26,12 @@ final class SourceHealthProbeTest extends TestCase {
 	}
 
 	public function testAccountKeyIsTheProviderAccount(): void {
-		$this->assertSame('http://prov.example:8080/live/user/pass/', SourceProber::accountKey('http://prov.example:8080/live/user/pass/101.ts'));
+		$this->assertSame('http://prov.example:8080/user/pass/', SourceProber::accountKey('http://prov.example:8080/live/user/pass/101.ts'));
+		// One account however the URL is written: /live/ or bare, .ts or .m3u8, the default port said or not.
+		$this->assertSame(SourceProber::accountKey('http://prov.example:8080/live/user/pass/101.ts'), SourceProber::accountKey('http://prov.example:8080/user/pass/5'));
+		$this->assertSame(SourceProber::accountKey('http://prov.example/live/user/pass/1.m3u8'), SourceProber::accountKey('http://prov.example:80/user/pass/2'));
+		$this->assertNotSame(SourceProber::accountKey('http://prov.example:8080/live/user/pass/1.ts'), SourceProber::accountKey('http://prov.example:8000/live/user/pass/1.ts'));
+		$this->assertNotSame(SourceProber::accountKey('http://prov.example/live/user/pass/1.ts'), SourceProber::accountKey('http://prov.example/live/user/old/1.ts'));
 		$this->assertSame(SourceProber::accountKey('http://PROV.example:8080/live/user/pass/7.ts'), SourceProber::accountKey('http://prov.example:8080/live/user/pass/101.ts'));
 		$this->assertNotSame(SourceProber::accountKey('http://prov.example:8080/live/other/pass/7.ts'), SourceProber::accountKey('http://prov.example:8080/live/user/pass/101.ts'));
 		$this->assertNull(SourceProber::accountKey('/srv/media/file.ts'));
@@ -174,9 +179,16 @@ final class SourceHealthProbeTest extends TestCase {
 			$this->assertSame([5], SourceHealthRepository::probeStreams());
 			$this->assertCount(2, SourceHealthRepository::probeCandidates([5]));
 			$this->assertSame(['http://a/1.ts'], SourceHealthRepository::onAirSources());
+			$rDb->query("INSERT INTO `streams` (`id`, `type`, `stream_display_name`, `stream_source`) VALUES (6, 1, 'Sport', ?), (8, 1, 'Film', ?)", json_encode(['http://a/7.ts']), json_encode(['http://a/9.ts']));
 			$rDb->query("INSERT INTO `streams_servers` (`stream_id`, `server_id`, `pid`, `stream_status`, `current_source`) VALUES (6, 1, 11, 0, 'http://a/7.ts'), (5, 2, 12, 0, 'http://a/1.ts'), (8, 1, 0, 1, 'http://a/9.ts')");
-			$this->assertSame(['http://a:/' => 3], SourceHealthRepository::accountConnections()); // two servers on one channel count twice; a stopped one not at all
-			$rDb->query('DELETE FROM `streams_servers` WHERE `stream_id` IN (6, 8) OR `server_id` = 2');
+			$this->assertSame(['http://a:80/' => 3], SourceHealthRepository::accountConnections()); // two servers on one channel count twice; a stopped one not at all
+			// A load balancer reports what it runs with the account blanked: it still counts, as the source the stream lists.
+			$rDb->query("INSERT INTO `streams` (`id`, `type`, `stream_display_name`, `stream_source`) VALUES (9, 1, 'Film 2', ?)", json_encode(['http://c.example:8080/live/u/p/44.ts', 'http://a/45.ts']));
+			$rDb->query("INSERT INTO `streams_servers` (`stream_id`, `server_id`, `pid`, `stream_status`, `current_source`) VALUES (9, 3, 13, 0, 'http://c.example:8080/live/xxxxx/xxxxx/44.ts')");
+			$this->assertSame(['http://a:80/' => 3, 'http://c.example:8080/u/p/' => 1], SourceHealthRepository::accountConnections());
+			$this->assertContains('http://c.example:8080/live/u/p/44.ts', SourceHealthRepository::onAirSources());
+			$rDb->query('DELETE FROM `streams_servers` WHERE `stream_id` IN (6, 8, 9) OR `server_id` = 2');
+			$rDb->query('DELETE FROM `streams` WHERE `id` IN (6, 8, 9)');
 
 			foreach ([[true, 900], [true, 1100], [false, null]] as $i => [$rOk, $rOpen]) {
 				SourceHealthRepository::saveProbe(5, 'http://b/2.ts', ['ok' => $rOk, 'open_ms' => $rOpen, 'speed' => $rOk ? 1.2 : null, 'label' => 'h264 1920x1080 25i', 'error' => $rOk ? '' : 'could not open: timed out'], 1000 + $i);

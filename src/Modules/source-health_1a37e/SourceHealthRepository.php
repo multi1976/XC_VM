@@ -47,15 +47,32 @@ final class SourceHealthRepository {
 	 * @return array<int, string> server id => source
 	 */
 	public static function running(int $rStreamID): array {
-		$rRows = self::db()->fetchAll(
-			'SELECT `server_id`, `current_source` FROM `streams_servers` WHERE `stream_id` = ? AND `pid` > 0 AND `stream_status` = 0 AND `current_source` IS NOT NULL',
-			$rStreamID
-		) ?: [];
 		$rRunning = [];
-		foreach ($rRows as $rRow) {
-			$rRunning[(int) $rRow['server_id']] = trim((string) $rRow['current_source']);
+		foreach (self::onAirRows($rStreamID) as $rRow) {
+			$rRunning[$rRow['server_id']] = $rRow['source'];
 		}
 		return $rRunning;
+	}
+
+	/**
+	 * Every encoder up right now, with the source it runs resolved to the URL the
+	 * stream lists (SourceProber::resolveOnAir): a load balancer reports it with
+	 * the account blanked, and that must still count against the account.
+	 *
+	 * @return list<array{stream_id:int, server_id:int, source:string}>
+	 */
+	public static function onAirRows(?int $rStreamID = null): array {
+		$rRows = self::db()->fetchAll(
+			'SELECT ss.`stream_id`, ss.`server_id`, ss.`current_source`, s.`stream_source` FROM `streams_servers` ss JOIN `streams` s ON s.`id` = ss.`stream_id` '
+			. "WHERE ss.`pid` > 0 AND ss.`stream_status` = 0 AND ss.`current_source` IS NOT NULL AND ss.`current_source` <> ''"
+			. ($rStreamID === null ? '' : ' AND ss.`stream_id` = ' . (int) $rStreamID)
+		) ?: [];
+		$rOut = [];
+		foreach ($rRows as $rRow) {
+			$rSources = array_map(static fn ($v): string => is_string($v) ? trim($v) : '', (array) json_decode(self::raw((string) $rRow['stream_source']), true));
+			$rOut[] = ['stream_id' => (int) $rRow['stream_id'], 'server_id' => (int) $rRow['server_id'], 'source' => SourceProber::resolveOnAir(self::raw((string) $rRow['current_source']), $rSources)];
+		}
+		return $rOut;
 	}
 
 	/**
@@ -226,9 +243,8 @@ final class SourceHealthRepository {
 	 */
 	public static function accountConnections(): array {
 		$rCounts = [];
-		$rSources = self::db()->fetchColumn('SELECT `current_source` FROM `streams_servers` WHERE `pid` > 0 AND `stream_status` = 0 AND `current_source` IS NOT NULL AND `current_source` <> \'\'') ?: [];
-		foreach ($rSources as $rSource) {
-			$rKey = SourceProber::accountKey(trim((string) $rSource));
+		foreach (self::onAirRows() as $rRow) {
+			$rKey = SourceProber::accountKey($rRow['source']);
 			if ($rKey !== null) {
 				$rCounts[$rKey] = ($rCounts[$rKey] ?? 0) + 1;
 			}
@@ -330,9 +346,7 @@ final class SourceHealthRepository {
 
 	/** @return list<string> every source on air on the panel right now (all streams, all servers) */
 	public static function onAirSources(): array {
-		return array_values(array_unique(array_map('trim', self::db()->fetchColumn(
-			'SELECT `current_source` FROM `streams_servers` WHERE `pid` > 0 AND `stream_status` = 0 AND `current_source` IS NOT NULL AND `current_source` <> \'\''
-		) ?: [])));
+		return array_values(array_unique(array_column(self::onAirRows(), 'source')));
 	}
 
 	/**

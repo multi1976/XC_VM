@@ -27,6 +27,7 @@ final class SourceHealthRepositoryTest extends TestCase {
 		$this->rDb = new TestDb();
 		$this->rDb->exec(InstallSchema::table('streams_logs'));
 		$this->rDb->exec(InstallSchema::table('streams_servers'));
+		$this->rDb->exec(InstallSchema::table('streams'));
 		$this->rDb->exec((string) file_get_contents($this->rDir . '/database.sql'));
 		DatabaseFactory::set($this->rDb);
 	}
@@ -57,6 +58,7 @@ final class SourceHealthRepositoryTest extends TestCase {
 			'audio' => ['codec_name' => 'aac', 'sample_rate' => '48000', 'channels' => 2],
 		]]);
 		$rInsert = 'INSERT INTO `streams_servers` (`stream_id`, `server_id`, `parent_id`, `pid`, `stream_status`, `current_source`, `stream_info`, `bitrate`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
+		$this->rDb->query("INSERT INTO `streams` (`id`, `type`, `stream_display_name`, `stream_source`) VALUES (7, 1, 'News', ?)", json_encode(['http://a/1.ts', 'http://b/1.ts']));
 		$this->rDb->query($rInsert, 7, 1, null, 1234, 0, 'http://a/1.ts', $rInfo, 3500);
 		$this->rDb->query($rInsert, 7, 2, 1, 999, 0, 'http://relay/7.ts', $rInfo, 3500); // child of server 1: skipped
 		$this->rDb->query($rInsert, 7, 3, null, null, 1, 'http://b/1.ts', $rInfo, null); // not running: skipped

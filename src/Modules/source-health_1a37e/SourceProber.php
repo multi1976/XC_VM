@@ -34,19 +34,73 @@ final class SourceProber {
 	/** Schemes a probe can open from MAIN. */
 	public const SCHEMES = ['http', 'https', 'rtmp', 'rtmps', 'rtsp'];
 
+	/** First path segments of an Xtream-style URL that come before <user>/<pass>/<id>. */
+	public const KINDS = ['live', 'movie', 'series', 'timeshift', 'hls', 'play'];
+
 	/**
-	 * The provider account a source URL belongs to: scheme, user info, host,
-	 * port and the path without its last segment (the channel id).
+	 * The provider account a source URL belongs to: scheme, user info, host and
+	 * port (the default one filled in), then the account. For an Xtream-style
+	 * path that is <user>/<pass>, whether the URL says /live/<user>/<pass>/1.ts,
+	 * /<user>/<pass>/1 or .m3u8: they are one account, one connection limit.
+	 * Any other path keeps everything but its last segment (the channel id).
 	 */
 	public static function accountKey(string $rUrl): ?string {
 		$rParts = parse_url(trim($rUrl));
 		if (!is_array($rParts) || empty($rParts['host'])) {
 			return null;
 		}
-		$rPath = (string) ($rParts['path'] ?? '/');
-		$rDir = rtrim(str_replace('\\', '/', dirname($rPath)), '/');
-		return strtolower(($rParts['scheme'] ?? '') . '://' . (isset($rParts['user']) ? $rParts['user'] . '@' : '') . $rParts['host'] . ':' . ($rParts['port'] ?? ''))
-			. $rDir . '/';
+		$rScheme = strtolower((string) ($rParts['scheme'] ?? ''));
+		$rPort = $rParts['port'] ?? match ($rScheme) { 'http' => 80, 'https' => 443, default => '' };
+		$rBase = $rScheme . '://' . strtolower((isset($rParts['user']) ? $rParts['user'] . '@' : '') . $rParts['host']) . ':' . $rPort;
+		$rPath = str_replace('\\', '/', (string) ($rParts['path'] ?? '/'));
+		$rSegs = array_values(array_filter(explode('/', $rPath), static fn (string $s): bool => $s !== ''));
+		if (count($rSegs) >= 4 && in_array(strtolower($rSegs[0]), self::KINDS, true)) {
+			return $rBase . '/' . $rSegs[1] . '/' . $rSegs[2] . '/';
+		}
+		if (count($rSegs) === 3 && in_array($rScheme, ['http', 'https'], true) && !in_array(strtolower($rSegs[0]), self::KINDS, true)) {
+			return $rBase . '/' . $rSegs[0] . '/' . $rSegs[1] . '/';
+		}
+		return $rBase . rtrim(dirname($rPath), '/') . '/';
+	}
+
+	/**
+	 * Which of a stream's own sources the panel says is on air. The running row
+	 * does not always hold the URL as the stream lists it: a load balancer
+	 * reports it with the account blanked (/live/xxxxx/xxxxx/1.ts), and the
+	 * puller may have rewritten it. The exact one wins, then the one on the same
+	 * host and port with the same channel id, then the only one on that host.
+	 *
+	 * @param list<string> $rSources the stream's sources
+	 */
+	public static function resolveOnAir(string $rCurrent, array $rSources): string {
+		$rCurrent = trim($rCurrent);
+		if ($rCurrent === '' || in_array($rCurrent, $rSources, true)) {
+			return $rCurrent;
+		}
+		$rWhere = static function (string $rUrl): ?array {
+			$p = parse_url(trim($rUrl));
+			if (!is_array($p) || empty($p['host'])) {
+				return null;
+			}
+			$rScheme = strtolower((string) ($p['scheme'] ?? ''));
+			$rLast = basename((string) ($p['path'] ?? ''));
+			return [strtolower($p['host']) . ':' . ($p['port'] ?? ($rScheme === 'https' ? 443 : 80)), strtolower((string) preg_replace('/\.[a-z0-9]+$/i', '', $rLast))];
+		};
+		$rMine = $rWhere($rCurrent);
+		if ($rMine === null) {
+			return $rCurrent;
+		}
+		$rSameHost = [];
+		foreach ($rSources as $rSource) {
+			$rIts = $rWhere((string) $rSource);
+			if ($rIts !== null && $rIts[0] === $rMine[0]) {
+				if ($rIts[1] === $rMine[1]) {
+					return trim((string) $rSource);
+				}
+				$rSameHost[] = trim((string) $rSource);
+			}
+		}
+		return count($rSameHost) === 1 ? $rSameHost[0] : $rCurrent;
 	}
 
 	/**

@@ -42,7 +42,7 @@ final class SourceAuditTest extends TestCase {
 	}
 
 	public function testTheProviderSaysWhetherABusyAccountHasAConnectionToSpare(): void {
-		$this->assertSame(['key' => 'http://p.example:8080/live/u/p/', 'host' => 'p.example', 'base' => 'http://p.example:8080', 'user' => 'u', 'pass' => 'p'], ProviderAccount::parse('http://p.example:8080/live/u/p/1.ts'));
+		$this->assertSame(['key' => 'http://p.example:8080/u/p/', 'host' => 'p.example', 'base' => 'http://p.example:8080', 'user' => 'u', 'pass' => 'p'], ProviderAccount::parse('http://p.example:8080/live/u/p/1.ts'));
 		$this->assertSame(['u2', 'p@2'], array_values(array_intersect_key((array) ProviderAccount::parse('http://h.example/u2/p%402/77'), ['user' => 1, 'pass' => 1])));
 		$this->assertNull(ProviderAccount::parse('http://h.example/stream.m3u8'));
 		$this->assertNull(ProviderAccount::parse('rtmp://h.example/live/u/p/1'));
@@ -69,8 +69,8 @@ final class SourceAuditTest extends TestCase {
 		$rOnAir = ['http://p.example/live/u/p/1.ts'];
 		$rDue = SourceAudit::due($rSources, [], $rOnAir, $rNow);
 		$this->assertSame([true, true], array_column($rDue, 'busy'));
-		$this->assertSame(['http://p.example:/live/u/p/'], SourceAudit::accountsToAsk($rDue, [], $rNow));
-		$rAccounts = [md5('http://p.example:/live/u/p/') => $rInfo + ['checked_at' => $rNow]];
+		$this->assertSame(['http://p.example:80/u/p/'], SourceAudit::accountsToAsk($rDue, [], $rNow));
+		$rAccounts = [md5('http://p.example:80/u/p/') => $rInfo + ['checked_at' => $rNow]];
 		$this->assertSame([], SourceAudit::accountsToAsk($rDue, $rAccounts, $rNow));
 		$this->assertSame(['http://p.example/live/u/p/2.ts'], array_column(SourceAudit::admit($rDue, $rAccounts, $rNow), 'source'));
 		$this->assertSame([], SourceAudit::admit($rDue, [], $rNow));
@@ -226,8 +226,8 @@ final class SourceAuditTest extends TestCase {
 
 			$this->assertSame(1, SourceHealthRepository::requeueAudit([md5($rC), 'not-a-hash']));
 			$this->assertSame(0, (int) SourceHealthRepository::auditState()[md5($rC)]['checked_at']);
-			SourceHealthRepository::saveAccount(md5('http://q.example:/live/v/w/'), 'q.example', ['api' => true, 'auth' => true, 'status' => 'Active', 'max' => 50, 'active' => 8, 'exp' => null], 1900);
-			$this->assertSame(['api' => true, 'auth' => true, 'status' => 'Active', 'max' => 50, 'active' => 8, 'exp' => null, 'checked_at' => 1900, 'host' => 'q.example'], SourceHealthRepository::accounts()[md5('http://q.example:/live/v/w/')]);
+			SourceHealthRepository::saveAccount(md5('http://q.example:80/v/w/'), 'q.example', ['api' => true, 'auth' => true, 'status' => 'Active', 'max' => 50, 'active' => 8, 'exp' => null], 1900);
+			$this->assertSame(['api' => true, 'auth' => true, 'status' => 'Active', 'max' => 50, 'active' => 8, 'exp' => null, 'checked_at' => 1900, 'host' => 'q.example'], SourceHealthRepository::accounts()[md5('http://q.example:80/v/w/')]);
 
 			$rHtml = SourceAuditPage::render(['status' => 'problems'], 2000);
 			$this->assertStringContainsString('Dead + down: 2', $rHtml);                    // the dead source in two streams
@@ -330,10 +330,10 @@ final class SourceAuditTest extends TestCase {
 
 			$rFound = ProviderImport::discover();
 			$this->assertCount(3, $rFound);
-			$rA = $rFound[md5('http://a.example:8080/live/u1/p1/')];
+			$rA = $rFound[md5('http://a.example:8080/u1/p1/')];
 			$this->assertSame([2, [5, 6], 8080, null], [$rA['sources'], $rA['streams'], $rA['port'], $rA['provider']]);
-			$this->assertTrue($rFound[md5('http://a.example:8080/live/u3/p3/')]['hls']);
-			$this->assertSame(1, $rFound[md5('http://b.example:/u2/p2/')]['provider']['id']);   // matched through its scheme and trailing slash
+			$this->assertTrue($rFound[md5('http://a.example:8080/u3/p3/')]['hls']);
+			$this->assertSame(1, $rFound[md5('http://b.example:80/u2/p2/')]['provider']['id']);   // matched through its scheme and trailing slash
 
 			$rResult = ProviderImport::add(array_keys($rFound));
 			$this->assertSame(['added' => 2, 'existing' => 1, 'failed' => 0], $rResult);
