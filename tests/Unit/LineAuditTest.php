@@ -77,7 +77,7 @@ final class LineAuditTest extends TestCase {
 
 	public function testEachTabListsWhatItShould(): void {
 		$rDb = new TestDb();
-		foreach (['lines', 'lines_live', 'lines_activity', 'lines_logs', 'users'] as $rTable) {
+		foreach (['lines', 'lines_live', 'lines_activity', 'lines_logs', 'users', 'streams'] as $rTable) {
 			$rDb->exec(InstallSchema::table($rTable));
 		}
 		foreach (array_filter(array_map('trim', explode(';', (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/line-audit_*')[0] . '/database.sql')))) as $rStatement) {
@@ -87,6 +87,7 @@ final class LineAuditTest extends TestCase {
 		try {
 			$rNow = time();
 			$rDb->query("INSERT INTO `users` (`id`, `username`) VALUES (5, 'reseller1')");
+			$rDb->query("INSERT INTO `streams` (`id`, `type`, `stream_display_name`) VALUES (1, 1, 'News')");
 			$rDb->query(
 				"INSERT INTO `lines` (`id`, `member_id`, `username`, `password`, `max_connections`, `exp_date`, `enabled`, `admin_enabled`, `last_activity`, `created_at`, `is_restreamer`) VALUES
 				 (1, 5, 'shared', 'x', 2, NULL, 1, 1, ?, ?, 0), (2, 5, 'expiring', 'x', 1, ?, 1, 1, ?, ?, 0), (3, 0, 'idle', 'x', 1, NULL, 1, 1, ?, ?, 0),
@@ -119,6 +120,8 @@ final class LineAuditTest extends TestCase {
 			$rRefused = $rView('refused');
 			$this->assertStringContainsString('USER_EXPIRED 2', $rRefused);
 			$this->assertStringContainsString('COUNTRY_DISALLOW 1', $rRefused);
+			$this->assertMatchesRegularExpression('/News <span[^>]*>×2/', $rRefused);                                // what the expired line kept asking for
+			$this->assertSame([4 => [['stream_id' => 1, 'name' => 'News', 'type' => 1, 'status' => 'USER_EXPIRED', 'n' => 2]]], LineAuditRepository::refusalStreams($rNow - 86400, [4]));
 			$rExpiry = $rView('expiry');
 			$this->assertMatchesRegularExpression('/Expiring in the next 7 days.*>expiring<\/a>.*Expired, still trying.*>expired<\/a>/s', $rExpiry);
 			$rUnused = $rView('unused');

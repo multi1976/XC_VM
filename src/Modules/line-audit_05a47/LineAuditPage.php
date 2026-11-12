@@ -221,11 +221,13 @@ final class LineAuditPage {
 	private static function refusedTab(array $rRefused, array $rCtx): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rHtml = '<p class="text-muted small">Attempts the panel refused in ' . self::window($rCtx) . ', from its client log, per line and reason. '
-			. 'Repeated refusals of one kind say what to fix: an expired line that is still used, a wrong country or ISP lock, a player that sends no user agent…</p>';
+			. 'Repeated refusals of one kind say what to fix: an expired line that is still used, a wrong country or ISP lock, a player that sends no user agent… '
+			. '<em>What it asked for</em> names the channels or films: a line refused NOT_IN_BOUQUET thousands of times on one channel has a player retrying a channel its package lacks.</p>';
 		if ($rRefused === []) {
 			return $rHtml . '<p class="text-muted mb-0">Nothing found. If you expected some, check that client logs are saved (Settings → <em>client_logs_save</em>).</p>';
 		}
-		$rHtml .= self::head(['Refusals', 'By reason']);
+		$rHtml .= self::head(['Refusals', 'By reason', 'What it asked for']);
+		$rAsked = LineAuditRepository::refusalStreams($rCtx['now'] - $rCtx['days'] * 86400, array_slice(array_keys($rRefused), 0, self::MAX_ROWS));
 		foreach (array_slice($rRefused, 0, self::MAX_ROWS, true) as $rID => $rStatuses) {
 			if (!isset($rCtx['lines'][$rID])) {
 				continue;
@@ -235,7 +237,20 @@ final class LineAuditPage {
 			foreach ($rStatuses as $rStatus => $n) {
 				$rBadges .= '<span class="badge bg-label-' . (in_array($rStatus, LineAuditAnalyzer::LINE_REFUSALS, true) ? 'warning' : 'secondary') . ' me-1">' . $h($rStatus) . ' ' . $n . '</span>';
 			}
-			$rHtml .= '<tr>' . self::lineCells($rCtx['lines'][$rID], $rCtx) . '<td class="text-center">' . array_sum($rStatuses) . '</td><td>' . $rBadges . '</td></tr>';
+			$rWhat = [];
+			foreach (array_slice($rAsked[$rID] ?? [], 0, 3) as $a) {
+				$rName = $a['stream_id'] === 0 ? '(no stream)' : ($a['name'] !== '' ? $a['name'] : '#' . $a['stream_id'] . ' (deleted)');
+				$rPage = match ($a['type']) {
+					1, 3, 4 => './stream?id=',
+					2       => './movie?id=',
+					default => '',
+				};
+				$rLabel = $h($rName) . ' <span class="text-muted">×' . $a['n'] . (count($rStatuses) > 1 ? ' ' . $h($a['status']) : '') . '</span>';
+				$rWhat[] = $rPage !== '' && $a['name'] !== '' ? '<a href="' . $rPage . $a['stream_id'] . '" target="_blank" rel="noopener">' . $rLabel . '</a>' : $rLabel;
+			}
+			$rMore = count($rAsked[$rID] ?? []) > 3 ? ' <span class="text-muted">+' . (count($rAsked[$rID]) - 3) . ' more</span>' : '';
+			$rHtml .= '<tr>' . self::lineCells($rCtx['lines'][$rID], $rCtx) . '<td class="text-center">' . array_sum($rStatuses) . '</td><td>' . $rBadges . '</td>'
+				. '<td><small>' . implode('<br>', $rWhat) . $rMore . '</small></td></tr>';
 		}
 		return $rHtml . self::tail(count($rRefused));
 	}

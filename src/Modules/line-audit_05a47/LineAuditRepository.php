@@ -133,6 +133,46 @@ final class LineAuditRepository {
 		return $rOut;
 	}
 
+	/**
+	 * What the refused attempts of these lines asked for: per line, the
+	 * streams (channels, films) and reasons, most refused first.
+	 *
+	 * @param list<int> $rUserIDs
+	 * @return array<int, list<array{stream_id:int, name:string, type:int, status:string, n:int}>> line id => refusals by stream
+	 */
+	public static function refusalStreams(int $rFrom, array $rUserIDs): array {
+		$rUserIDs = array_values(array_filter(array_unique(array_map('intval', $rUserIDs))));
+		if ($rUserIDs === []) {
+			return [];
+		}
+		$rOut = [];
+		$rStreamIDs = [];
+		foreach (array_chunk($rUserIDs, 500) as $rChunk) {
+			$rRows = self::db()->fetchAll(
+				'SELECT `user_id`, `stream_id`, `client_status`, COUNT(*) AS `n` FROM `lines_logs` WHERE `date` >= ? AND `user_id` IN (' . implode(',', $rChunk) . ')
+				 GROUP BY `user_id`, `stream_id`, `client_status` ORDER BY `n` DESC',
+				$rFrom
+			) ?: [];
+			foreach ($rRows as $rRow) {
+				$rOut[(int) $rRow['user_id']][] = ['stream_id' => (int) $rRow['stream_id'], 'name' => '', 'type' => 0, 'status' => (string) $rRow['client_status'], 'n' => (int) $rRow['n']];
+				$rStreamIDs[(int) $rRow['stream_id']] = true;
+			}
+		}
+		unset($rStreamIDs[0]);
+		$rNames = [];
+		foreach (array_chunk(array_keys($rStreamIDs), 1000) as $rChunk) {
+			foreach (self::db()->fetchAll('SELECT `id`, `type`, `stream_display_name` FROM `streams` WHERE `id` IN (' . implode(',', $rChunk) . ')') ?: [] as $rRow) {
+				$rNames[(int) $rRow['id']] = [self::raw((string) $rRow['stream_display_name']), (int) $rRow['type']];
+			}
+		}
+		foreach ($rOut as &$rList) {
+			foreach ($rList as &$rItem) {
+				[$rItem['name'], $rItem['type']] = $rNames[$rItem['stream_id']] ?? ['', 0];
+			}
+		}
+		return $rOut;
+	}
+
 	/** @param list<array<string, mixed>> $rSamples rows for line_audit_samples */
 	public static function saveSamples(array $rSamples): void {
 		foreach ($rSamples as $r) {
