@@ -135,4 +135,47 @@ final class LineAuditTest extends TestCase {
 			DatabaseFactory::reset();
 		}
 	}
+
+	public function testTwoPlacesTakingALineFromEachOtherAreTold(): void {
+		$this->assertSame('none', LineAuditAnalyzer::sharing(null, null, [], ['handovers' => 2, 'returns' => 1])['level']);   // a phone off Wi-Fi and back
+		$s = LineAuditAnalyzer::sharing(null, ['ips' => 2, 'countries' => 1, 'isps' => 2], [], ['handovers' => 8, 'returns' => 7]);
+		$this->assertSame('suspicious', $s['level']);
+		$this->assertStringContainsString('took it from each other 7 times', implode('; ', $s['reasons']));
+		$this->assertSame('likely', LineAuditAnalyzer::sharing(null, null, [], ['handovers' => 12, 'returns' => 11])['level']);
+
+		$rDb = new TestDb();
+		foreach (['lines', 'lines_live', 'lines_activity', 'lines_logs', 'users', 'streams'] as $rTable) {
+			$rDb->exec(InstallSchema::table($rTable));
+		}
+		foreach (array_filter(array_map('trim', explode(';', (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/line-audit_*')[0] . '/database.sql')))) as $rStatement) {
+			$rDb->exec($rStatement);
+		}
+		DatabaseFactory::set($rDb);
+		try {
+			$rNow = time();
+			$rDb->query("INSERT INTO `lines` (`id`, `member_id`, `username`, `password`, `max_connections`, `exp_date`, `enabled`, `admin_enabled`, `last_activity`, `created_at`, `is_restreamer`) VALUES
+				(6, 0, 'pingpong', 'x', 1, NULL, 1, 1, ?, ?, 0), (7, 0, 'mover', 'x', 1, NULL, 1, 1, ?, ?, 0), (8, 0, 'home', 'x', 1, NULL, 1, 1, ?, ?, 0)",
+				$rNow, $rNow - 90 * 86400, $rNow, $rNow - 90 * 86400, $rNow, $rNow - 90 * 86400);
+			$rAdd = static fn (int $u, string $ip, int $a, int $b) => $rDb->query("INSERT INTO `lines_activity` (`user_id`, `stream_id`, `server_id`, `user_ip`, `geoip_country_code`, `isp`, `user_agent`, `date_start`, `date_end`) VALUES (?, 1, 1, ?, 'AL', 'ISP', 'VLC', ?, ?)", $u, $ip, $a, $b);
+			// pingpong: two homes on a one-connection line, each closed the second the other opens (an HLS one a little later).
+			for ($i = 0; $i < 12; $i++) {
+				$rAdd(6, $i % 2 ? '10.0.0.2' : '10.0.0.1', $rNow - 7200 + $i * 300, $rNow - 7200 + ($i + 1) * 300 + ($i === 3 ? 25 : 0));
+			}
+			// mover: one device, home then mobile data; home: the same IP all evening, with breaks.
+			$rAdd(7, '10.1.0.1', $rNow - 7200, $rNow - 3600);
+			$rAdd(7, '10.1.0.2', $rNow - 3598, $rNow - 1800);
+			$rAdd(8, '10.2.0.1', $rNow - 7200, $rNow - 6000);
+			$rAdd(8, '10.2.0.1', $rNow - 5990, $rNow - 3000);
+			$rAdd(8, '10.2.0.1', $rNow - 2000, $rNow - 1000);
+
+			$this->assertSame([6 => ['handovers' => 11, 'returns' => 10], 7 => ['handovers' => 1, 'returns' => 0]], LineAuditRepository::handovers($rNow - 86400));
+			$rSharing = LineAuditPage::render(['view' => 'sharing'], $rNow);
+			$this->assertStringContainsString('>pingpong</a>', $rSharing);
+			$this->assertStringContainsString('Likely shared', $rSharing);
+			$this->assertStringNotContainsString('>mover</a>', $rSharing);
+			$this->assertStringNotContainsString('10.0.0.', $rSharing);   // counts, never the addresses
+		} finally {
+			DatabaseFactory::reset();
+		}
+	}
 }

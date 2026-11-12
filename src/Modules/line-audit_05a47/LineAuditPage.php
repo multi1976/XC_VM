@@ -31,6 +31,7 @@ final class LineAuditPage {
 		$rSamples = LineAuditRepository::sampleStats($rFrom);
 		$rRefusals = LineAuditRepository::refusals($rFrom);
 		$rPlayers = LineAuditRepository::players($rFrom);
+		$rHandovers = LineAuditRepository::handovers($rFrom);
 		$rOwners = LineAuditRepository::owners(array_column($rLines, 'member_id'));
 		$rKeep = static fn (array $l): bool => ($rReseller === 0 || (int) $l['member_id'] === $rReseller)
 			&& ($rSearch === '' || mb_stripos((string) $l['username'], $rSearch) !== false);
@@ -39,7 +40,7 @@ final class LineAuditPage {
 		// Findings, per tab.
 		$rSharing = [];
 		foreach ($rScope as $rID => $l) {
-			$s = LineAuditAnalyzer::sharing($rSamples[$rID] ?? null, $rHistory[$rID] ?? null, $rPlayers[$rID] ?? []);
+			$s = LineAuditAnalyzer::sharing($rSamples[$rID] ?? null, $rHistory[$rID] ?? null, $rPlayers[$rID] ?? [], $rHandovers[$rID] ?? null);
 			if ($s['level'] !== 'none') {
 				$rSharing[$rID] = $s;
 			}
@@ -89,7 +90,7 @@ final class LineAuditPage {
 			. '<button class="btn btn-sm btn-primary" type="submit">Apply</button>'
 			. '<small class="text-muted ms-2">' . count($rScope) . ' lines · ' . array_sum(array_intersect_key($rLive, $rScope)) . ' connections now</small></form>';
 
-		$rCtx = ['players' => $rPlayers, 'lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
+		$rCtx = ['handovers' => $rHandovers, 'players' => $rPlayers, 'lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
 		return $rHtml . match ($rView) {
 			'sharing'  => self::sharingTab($rSharing, $rCtx),
 			'limits'   => self::limitsTab($rLimits, $rCtx),
@@ -173,12 +174,14 @@ final class LineAuditPage {
 	private static function sharingTab(array $rSharing, array $rCtx): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rHtml = '<p class="text-muted small">Lines used from several places. <strong>At the same time</strong> comes from the live connections, looked at every five minutes '
-			. '(two countries at once cannot be one household); the rest from the sessions of ' . self::window($rCtx) . '. A restreamer is expected to look like this. '
+			. '(two countries at once cannot be one household); the rest from the sessions of ' . self::window($rCtx) . '. '
+			. 'On a line with one or two connections a shared account is rarely seen at once: the panel closes the older connection when a new one opens, '
+			. 'so the places take it from each other, back and forth. <strong>Handovers</strong> counts those (a return is A, B, then A again). A restreamer is expected to look like this. '
 			. 'A phone on mobile data and a TV at home are two IPs and two ISPs: one sign alone is a note, not a verdict.</p>';
 		if ($rSharing === []) {
 			return $rHtml . '<p class="text-muted mb-0">Nothing found.</p>';
 		}
-		$rHtml .= self::head(['Verdict', 'Why', 'Countries', 'ISPs (widest moment)', 'Players', 'Sessions']);
+		$rHtml .= self::head(['Verdict', 'Why', 'IPs', 'Handovers', 'Countries', 'ISPs (widest moment)', 'Players', 'Sessions']);
 		foreach (array_slice($rSharing, 0, self::MAX_ROWS, true) as $rID => $s) {
 			$l = $rCtx['lines'][$rID];
 			$rHist = $rCtx['history'][$rID] ?? null;
@@ -194,6 +197,8 @@ final class LineAuditPage {
 			$rHtml .= '<tr class="' . $rRow . '">' . self::lineCells($l, $rCtx)
 				. '<td><span class="badge ' . $rClass . '">' . $rLabel . '</span></td>'
 				. '<td><small>' . $h(implode('; ', $s['reasons'])) . '</small></td>'
+				. '<td class="text-center">' . (int) ($rHist['ips'] ?? 0) . '</td>'
+				. '<td class="text-center">' . self::handoverCell($rCtx['handovers'][$rID] ?? null) . '</td>'
 				. '<td><small>' . $h(trim(($rSam['country_list'] ?? '') !== '' ? $rSam['country_list'] : ($rHist['country_list'] ?? ''), ',')) . '</small></td>'
 				. '<td><small class="text-muted">' . $h(mb_strimwidth((string) ($rSam['isp_list'] ?? ''), 0, 90, '…')) . '</small></td>'
 				. '<td><small>' . self::players($rCtx['players'][$rID] ?? [], (string) ($rSam['ua_list'] ?? '')) . '</small></td>'
@@ -297,17 +302,32 @@ final class LineAuditPage {
 
 	private static function unstableTab(array $rUnstable, array $rCtx): string {
 		$rHtml = '<p class="text-muted small">Lines with 20 sessions or more under a minute in ' . self::window($rCtx) . ', at least half of all their sessions. '
-			. 'A weak connection, a player that reconnects in a loop, or a stream that fails for everyone — if several lines show it on the same channel, look at the channel in Source Health.</p>';
+			. 'A weak connection, a player that reconnects in a loop, or a stream that fails for everyone — if several lines show it on the same channel, look at the channel in Source Health. '
+			. 'Short sessions that hand over between IPs are something else: two places taking the line from each other (the panel closes one when the other opens); those are in Shared accounts too.</p>';
 		if ($rUnstable === []) {
 			return $rHtml . '<p class="text-muted mb-0">Nothing found.</p>';
 		}
-		$rHtml .= self::head(['Short sessions', 'All sessions', 'Watched']);
+		$rHtml .= self::head(['Short sessions', 'All sessions', 'Watched', 'IPs', 'Handovers', 'Likely cause']);
 		foreach (array_slice($rUnstable, 0, self::MAX_ROWS, true) as $l) {
 			$rHist = $rCtx['history'][(int) $l['id']];
-			$rHtml .= '<tr>' . self::lineCells($l, $rCtx) . '<td class="text-center text-danger">' . $rHist['short'] . '</td><td class="text-center">' . $rHist['sessions'] . '</td>'
-				. '<td>' . LineAuditAnalyzer::duration($rHist['watched']) . '</td></tr>';
+			$rHand = $rCtx['handovers'][(int) $l['id']] ?? null;
+			$rHtml .= '<tr class="' . (($rHand['returns'] ?? 0) >= LineAuditAnalyzer::HANDOVER_RETURNS ? 'table-warning' : '') . '">' . self::lineCells($l, $rCtx) . '<td class="text-center text-danger">' . $rHist['short'] . '</td><td class="text-center">' . $rHist['sessions'] . '</td>'
+				. '<td>' . LineAuditAnalyzer::duration($rHist['watched']) . '</td>'
+				. '<td class="text-center">' . $rHist['ips'] . '</td>'
+				. '<td class="text-center">' . self::handoverCell($rHand) . '</td>'
+				. '<td><small>' . LineAuditAnalyzer::unstableCause($rHist, $rHand) . '</small></td></tr>';
 		}
 		return $rHtml . self::tail(count($rUnstable));
+	}
+
+	/** @param array{handovers:int, returns:int}|null $rHand */
+	private static function handoverCell(?array $rHand): string {
+		if ($rHand === null) {
+			return '<span class="text-muted">0</span>';
+		}
+		$rHot = $rHand['returns'] >= LineAuditAnalyzer::HANDOVER_RETURNS;
+		return '<span class="' . ($rHot ? 'text-danger fw-semibold' : '') . '" title="handovers between IPs, of them returns to the IP before">'
+			. $rHand['handovers'] . ($rHand['returns'] > 0 ? ' <small class="text-muted">(' . $rHand['returns'] . ' back)</small>' : '') . '</span>';
 	}
 
 	/**

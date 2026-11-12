@@ -8,7 +8,10 @@ namespace XcVm\Module\LineAudit;
  * Shared account: one line used from several places. Concurrent use from two
  * countries is the strongest sign (a line cannot be in two countries at once);
  * several IPs at the same time, many countries, ISPs or IPs over a day add to
- * it. A restreamer is expected to look like this and is judged apart.
+ * it. On a line with few connections sharing rarely shows as use at once: the
+ * panel closes the older connection when a new one opens, so two places take
+ * the line from each other, back and forth (handovers). A restreamer is
+ * expected to look like this and is judged apart.
  *
  * Players: user agents are grouped into families (all versions of TiviMate are
  * one), since a household with a TV, a phone and a tablet legitimately shows
@@ -17,6 +20,11 @@ namespace XcVm\Module\LineAudit;
  * restreamer is a strong sign on its own.
  */
 final class LineAuditAnalyzer {
+	/** Returns (IP A, then B, then A again, each opening as the other closes) that make a line suspicious… */
+	public const HANDOVER_RETURNS = 3;
+	/** …and that are enough on their own: few devices go back and forth that often within seconds. */
+	public const HANDOVER_RETURNS_MANY = 10;
+
 	/** User agent => player family, first match wins. */
 	private const PLAYER_FAMILIES = [
 		'~lavf|libavformat|ffmpeg|ffprobe~i'         => 'ffmpeg / Lavf',
@@ -103,9 +111,10 @@ final class LineAuditAnalyzer {
 	 * @param array{samples:int, multi_ip:int, multi_country:int, max_ips:int, max_countries:int}|null $rSamples five-minute samples (concurrent use)
 	 * @param array{ips:int, countries:int, isps:int}|null $rHistory sessions in the window
 	 * @param array<string, int> $rPlayers player family => sessions in the window
+	 * @param array{handovers:int, returns:int}|null $rHandovers places taking the line from each other
 	 * @return array{score:int, level:string, reasons:list<string>}
 	 */
-	public static function sharing(?array $rSamples, ?array $rHistory, array $rPlayers = []): array {
+	public static function sharing(?array $rSamples, ?array $rHistory, array $rPlayers = [], ?array $rHandovers = null): array {
 		$rScore = 0;
 		$rWhy = [];
 		$rTools = array_values(array_intersect(array_keys($rPlayers), self::TOOLS));
@@ -129,6 +138,13 @@ final class LineAuditAnalyzer {
 		if (count($rFamilies) >= 4) {
 			$rScore += 1;
 			$rWhy[] = count($rFamilies) . ' different players';
+		}
+		// The usual sign on a line with few connections: it is never used from
+		// two places at once, the panel closes one when the other opens. Going
+		// back and forth is not a phone moving from Wi-Fi to mobile data.
+		if ($rHandovers !== null && $rHandovers['returns'] >= self::HANDOVER_RETURNS) {
+			$rScore += $rHandovers['returns'] >= self::HANDOVER_RETURNS_MANY ? 4 : 2;
+			$rWhy[] = 'two places took it from each other ' . $rHandovers['returns'] . ' times (' . $rHandovers['handovers'] . ' handovers between IPs)';
 		}
 		if ($rHistory !== null && $rHistory['countries'] >= 2) {
 			$rScore += 2;
@@ -160,6 +176,20 @@ final class LineAuditAnalyzer {
 	 */
 	public static function unstable(?array $rHistory): bool {
 		return $rHistory !== null && $rHistory['short'] >= 20 && $rHistory['short'] * 2 >= $rHistory['sessions'];
+	}
+
+	/**
+	 * Why a line keeps dropping, as far as its sessions tell.
+	 *
+	 * @param array{ips:int}|array<string, int> $rHistory
+	 * @param array{handovers:int, returns:int}|null $rHand
+	 */
+	public static function unstableCause(array $rHistory, ?array $rHand): string {
+		return match (true) {
+			($rHand['returns'] ?? 0) >= self::HANDOVER_RETURNS => 'two places take the line from each other',
+			(int) ($rHistory['ips'] ?? 0) <= 1                  => 'one place: its connection or its player',
+			default                                            => 'a few IPs: a moving device, or look at the logs',
+		};
 	}
 
 	/** Refusals that say the line itself is the problem (not a stream, not the server). */

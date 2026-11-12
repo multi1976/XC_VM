@@ -13,6 +13,11 @@ use XcVm\Infrastructure\Database\DatabaseAware;
  * on every core table; it writes only its own `line_audit_samples`.
  */
 final class LineAuditRepository {
+	/** Seconds between one session's end and the next's start that still make a handover. */
+	public const HANDOVER_GAP_SEC = 20;
+	/** …and how far the next may start before the previous was closed. */
+	public const HANDOVER_OVERLAP_SEC = 60;
+
 	use DatabaseAware;
 
 	public const SAMPLE_TTL_SEC = 7 * 86400;
@@ -97,6 +102,35 @@ final class LineAuditRepository {
 				'sessions' => (int) $rRow['sessions'], 'ips' => (int) $rRow['ips'], 'countries' => (int) $rRow['countries'], 'isps' => (int) $rRow['isps'],
 				'uas' => (int) $rRow['uas'], 'short' => (int) $rRow['short'], 'watched' => (int) $rRow['watched'], 'country_list' => (string) $rRow['country_list'],
 			];
+		}
+		return $rOut;
+	}
+
+	/**
+	 * Per line, how often one place took it over from another since $rFrom.
+	 * At its connection limit the panel closes the oldest connection when a new
+	 * one opens: two households on a one-connection line show as sessions from
+	 * two IPs that end the moment the other starts, back and forth (A, B, A…).
+	 * A handover is the next session from another IP starting within
+	 * HANDOVER_GAP_SEC of the previous one's end (or up to HANDOVER_OVERLAP_SEC
+	 * before it: an HLS session is closed a little after it is replaced); a
+	 * return is a handover back to the IP of the session before.
+	 *
+	 * @return array<int, array{handovers:int, returns:int}>
+	 */
+	public static function handovers(int $rFrom): array {
+		$rOut = [];
+		$rRows = self::db()->fetchAll(
+			'SELECT `user_id`, SUM(`h`) AS `handovers`, SUM(`h` AND `ip` = `ip2`) AS `returns` FROM (
+			   SELECT `user_id`, `user_ip` AS `ip`, LAG(`user_ip`, 2) OVER w AS `ip2`,
+			          (`user_ip` <> LAG(`user_ip`) OVER w AND `date_start` - LAG(`date_end`) OVER w BETWEEN ? AND ?) AS `h`
+			   FROM `lines_activity` WHERE `date_start` >= ? AND `user_id` > 0 AND `date_end` IS NOT NULL
+			   WINDOW w AS (PARTITION BY `user_id` ORDER BY `date_start`, `activity_id`)
+			 ) t GROUP BY `user_id` HAVING `handovers` > 0',
+			-self::HANDOVER_OVERLAP_SEC, self::HANDOVER_GAP_SEC, $rFrom
+		) ?: [];
+		foreach ($rRows as $rRow) {
+			$rOut[(int) $rRow['user_id']] = ['handovers' => (int) $rRow['handovers'], 'returns' => (int) $rRow['returns']];
 		}
 		return $rOut;
 	}
