@@ -21,3 +21,17 @@ CREATE TABLE IF NOT EXISTS `line_audit_samples` (
   KEY `sampled_at` (`sampled_at`),
   KEY `user_sampled` (`user_id`, `sampled_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Every ISP a line has been used from, with when it was first and last seen.
+-- The panel keeps only the line's current ISP (lines.isp_desc) and each
+-- session's: this remembers them past the activity log, to tell a line that
+-- starts coming from an ISP it never used before.
+CREATE TABLE IF NOT EXISTS `line_audit_isps` (
+  `user_id` int(11) NOT NULL,
+  `isp_hash` char(32) NOT NULL,
+  `isp` varchar(255) NOT NULL,
+  `first_seen` int(11) NOT NULL,
+  `last_seen` int(11) NOT NULL,
+  PRIMARY KEY (`user_id`, `isp_hash`),
+  KEY `first_seen` (`first_seen`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

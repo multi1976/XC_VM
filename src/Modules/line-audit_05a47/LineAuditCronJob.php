@@ -8,8 +8,8 @@ use XcVm\Core\Cluster\NodeRole;
 
 /**
  * `cron:line_audit` — every five minutes, MAIN only: record how the lines with
- * two connections or more (or at their limit) are connected, and forget
- * samples older than a week. Runs as xc_vm; started as root (from root's
+ * two connections or more (or at their limit) are connected, forget samples
+ * older than a week, and remember the ISPs each line is used from. Runs as xc_vm; started as root (from root's
  * crontab) it re-runs itself as xc_vm.
  */
 class LineAuditCronJob implements CommandInterface {
@@ -44,6 +44,7 @@ class LineAuditCronJob implements CommandInterface {
 		$rSamples = LineAuditAnalyzer::samples($rConnections, LineAuditRepository::lines(array_column($rConnections, 'user_id')), $rNow);
 		LineAuditRepository::saveSamples($rSamples);
 		LineAuditRepository::pruneSamples($rNow);
+		LineAuditRepository::recordIsps($rNow, $rNow - 900, $rConnections);
 		return count($rSamples);
 	}
 }

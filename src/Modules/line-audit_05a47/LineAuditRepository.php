@@ -57,11 +57,12 @@ final class LineAuditRepository {
 	 */
 	public static function lines(array $rIDs = []): array {
 		$rOut = [];
-		$rSql = 'SELECT `id`, `username`, `member_id`, `max_connections`, `exp_date`, `enabled`, `admin_enabled`, `is_trial`, `is_restreamer`, `is_mag`, `is_e2`, `last_activity`, `created_at` FROM `lines`';
+		$rSql = 'SELECT `id`, `username`, `member_id`, `max_connections`, `exp_date`, `enabled`, `admin_enabled`, `is_trial`, `is_restreamer`, `is_mag`, `is_e2`, `is_isplock`, `isp_desc`, `last_activity`, `created_at` FROM `lines`';
 		foreach ($rIDs === [] ? [null] : array_chunk(array_values(array_unique(array_map('intval', $rIDs))), 1000) as $rChunk) {
 			$rRows = $rChunk === null ? self::db()->fetchAll($rSql) : self::db()->fetchAll($rSql . ' WHERE `id` IN (' . implode(',', $rChunk) . ')');
 			foreach ($rRows ?: [] as $rRow) {
 				$rRow['username'] = self::raw((string) $rRow['username']);
+				$rRow['isp_desc'] = self::raw((string) ($rRow['isp_desc'] ?? ''));
 				$rOut[(int) $rRow['id']] = $rRow;
 			}
 		}
@@ -116,13 +117,16 @@ final class LineAuditRepository {
 	 * before it: an HLS session is closed a little after it is replaced); a
 	 * return is a handover back to the IP of the session before.
 	 *
-	 * @return array<int, array{handovers:int, returns:int}>
+	 * isp_returns are the returns that also change ISP: two homes, not one
+	 * router given a new address.
+	 *
+	 * @return array<int, array{handovers:int, returns:int, isp_returns:int}>
 	 */
 	public static function handovers(int $rFrom): array {
 		$rOut = [];
 		$rRows = self::db()->fetchAll(
-			'SELECT `user_id`, SUM(`h`) AS `handovers`, SUM(`h` AND `ip` = `ip2`) AS `returns` FROM (
-			   SELECT `user_id`, `user_ip` AS `ip`, LAG(`user_ip`, 2) OVER w AS `ip2`,
+			'SELECT `user_id`, SUM(`h`) AS `handovers`, SUM(`h` AND `ip` = `ip2`) AS `returns`, SUM(`h` AND `ip` = `ip2` AND `isp` <> `isp1`) AS `isp_returns` FROM (
+			   SELECT `user_id`, `user_ip` AS `ip`, LAG(`user_ip`, 2) OVER w AS `ip2`, COALESCE(`isp`, \'\') AS `isp`, COALESCE(LAG(`isp`) OVER w, \'\') AS `isp1`,
 			          (`user_ip` <> LAG(`user_ip`) OVER w AND `date_start` - LAG(`date_end`) OVER w BETWEEN ? AND ?) AS `h`
 			   FROM `lines_activity` WHERE `date_start` >= ? AND `user_id` > 0 AND `date_end` IS NOT NULL
 			   WINDOW w AS (PARTITION BY `user_id` ORDER BY `date_start`, `activity_id`)
@@ -130,7 +134,72 @@ final class LineAuditRepository {
 			-self::HANDOVER_OVERLAP_SEC, self::HANDOVER_GAP_SEC, $rFrom
 		) ?: [];
 		foreach ($rRows as $rRow) {
-			$rOut[(int) $rRow['user_id']] = ['handovers' => (int) $rRow['handovers'], 'returns' => (int) $rRow['returns']];
+			$rOut[(int) $rRow['user_id']] = ['handovers' => (int) $rRow['handovers'], 'returns' => (int) $rRow['returns'], 'isp_returns' => (int) $rRow['isp_returns']];
+		}
+		return $rOut;
+	}
+
+	/**
+	 * Remember the ISPs lines are used from: those of the sessions that ended
+	 * since $rSince, of the lines used since then (their current ISP) and of
+	 * the connections live now. The first run reads the whole activity log.
+	 *
+	 * @param list<array{user_id:int, isp:string, date_start:int}> $rLive
+	 * @return int rows written
+	 */
+	public static function recordIsps(int $rNow, int $rSince, array $rLive): int {
+		$rRows = [];
+		$rAdd = static function (int $rUser, string $rIsp, int $rFirst, int $rLast) use (&$rRows): void {
+			$rIsp = trim(self::raw($rIsp));
+			if ($rUser <= 0 || $rIsp === '') {
+				return;
+			}
+			$rKey = $rUser . ':' . md5(mb_strtolower($rIsp));
+			$rFirst = $rFirst > 0 ? $rFirst : $rLast;
+			$rRows[$rKey] = isset($rRows[$rKey])
+				? [$rUser, $rRows[$rKey][1], $rRows[$rKey][2], min($rRows[$rKey][3], $rFirst), max($rRows[$rKey][4], $rLast)]
+				: [$rUser, md5(mb_strtolower($rIsp)), mb_substr($rIsp, 0, 255), $rFirst, $rLast];
+		};
+		$rEmpty = (int) self::db()->fetchValue('SELECT COUNT(*) FROM `line_audit_isps`') === 0;
+		$rSessions = self::db()->fetchAll(
+			'SELECT `user_id`, `isp`, MIN(`date_start`) AS `f`, MAX(COALESCE(`date_end`, `date_start`)) AS `l` FROM `lines_activity` '
+			. "WHERE `user_id` > 0 AND `isp` IS NOT NULL AND `isp` <> ''" . ($rEmpty ? '' : ' AND `date_end` >= ?') . ' GROUP BY `user_id`, `isp`',
+			...($rEmpty ? [] : [$rSince])
+		) ?: [];
+		foreach ($rSessions as $r) {
+			$rAdd((int) $r['user_id'], (string) $r['isp'], (int) $r['f'], (int) $r['l']);
+		}
+		foreach (self::db()->fetchAll("SELECT `id`, `isp_desc`, `last_activity` FROM `lines` WHERE `isp_desc` IS NOT NULL AND `isp_desc` <> '' AND `last_activity` >= ?", $rEmpty ? 0 : $rSince) ?: [] as $r) {
+			$rAdd((int) $r['id'], (string) $r['isp_desc'], (int) $r['last_activity'], (int) $r['last_activity']);
+		}
+		foreach ($rLive as $c) {
+			$rAdd((int) $c['user_id'], (string) ($c['isp'] ?? ''), (int) ($c['date_start'] ?? 0), $rNow);
+		}
+		foreach (array_chunk(array_values($rRows), 500) as $rChunk) {
+			self::db()->query(
+				'INSERT INTO `line_audit_isps` (`user_id`, `isp_hash`, `isp`, `first_seen`, `last_seen`) VALUES ' . implode(',', array_fill(0, count($rChunk), '(?, ?, ?, ?, ?)'))
+				. ' ON DUPLICATE KEY UPDATE `first_seen` = LEAST(`first_seen`, VALUES(`first_seen`)), `last_seen` = GREATEST(`last_seen`, VALUES(`last_seen`))',
+				...array_merge(...$rChunk)
+			);
+		}
+		self::db()->query('DELETE i FROM `line_audit_isps` i LEFT JOIN `lines` l ON l.`id` = i.`user_id` WHERE l.`id` IS NULL');
+		return count($rRows);
+	}
+
+	/**
+	 * The ISPs of every line that started using a new one since $rFrom.
+	 *
+	 * @return array<int, list<array{isp:string, first_seen:int, last_seen:int}>> line id => its ISPs, oldest first
+	 */
+	public static function ispHistory(int $rFrom): array {
+		$rOut = [];
+		$rRows = self::db()->fetchAll(
+			'SELECT i.`user_id`, i.`isp`, i.`first_seen`, i.`last_seen` FROM `line_audit_isps` i '
+			. 'JOIN (SELECT DISTINCT `user_id` FROM `line_audit_isps` WHERE `first_seen` >= ?) n ON n.`user_id` = i.`user_id` ORDER BY i.`user_id`, i.`first_seen`',
+			$rFrom
+		) ?: [];
+		foreach ($rRows as $r) {
+			$rOut[(int) $r['user_id']][] = ['isp' => self::raw((string) $r['isp']), 'first_seen' => (int) $r['first_seen'], 'last_seen' => (int) $r['last_seen']];
 		}
 		return $rOut;
 	}

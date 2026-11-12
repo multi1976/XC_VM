@@ -5,6 +5,7 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 use XcVm\Infrastructure\Database\DatabaseFactory;
 use XcVm\Module\LineAudit\LineAuditAnalyzer;
+use XcVm\Module\LineAudit\LineAuditController;
 use XcVm\Module\LineAudit\LineAuditCronJob;
 use XcVm\Module\LineAudit\LineAuditPage;
 use XcVm\Module\LineAudit\LineAuditRepository;
@@ -20,7 +21,7 @@ final class LineAuditTest extends TestCase {
 		if ($rDir === null) {
 			self::markTestSkipped('The line-audit module is not installed in this tree.');
 		}
-		foreach (['LineAuditRepository', 'LineAuditAnalyzer', 'LineAuditPage', 'LineAuditCronJob'] as $rClass) {
+		foreach (['LineAuditRepository', 'LineAuditAnalyzer', 'LineAuditPage', 'LineAuditCronJob', 'LineAuditController'] as $rClass) {
 			require_once $rDir . '/' . $rClass . '.php';
 		}
 	}
@@ -168,12 +169,60 @@ final class LineAuditTest extends TestCase {
 			$rAdd(8, '10.2.0.1', $rNow - 5990, $rNow - 3000);
 			$rAdd(8, '10.2.0.1', $rNow - 2000, $rNow - 1000);
 
-			$this->assertSame([6 => ['handovers' => 11, 'returns' => 10], 7 => ['handovers' => 1, 'returns' => 0]], LineAuditRepository::handovers($rNow - 86400));
+			$this->assertSame([6 => ['handovers' => 11, 'returns' => 10, 'isp_returns' => 0], 7 => ['handovers' => 1, 'returns' => 0, 'isp_returns' => 0]], LineAuditRepository::handovers($rNow - 86400));
 			$rSharing = LineAuditPage::render(['view' => 'sharing'], $rNow);
 			$this->assertStringContainsString('>pingpong</a>', $rSharing);
 			$this->assertStringContainsString('Likely shared', $rSharing);
 			$this->assertStringNotContainsString('>mover</a>', $rSharing);
 			$this->assertStringNotContainsString('10.0.0.', $rSharing);   // counts, never the addresses
+		} finally {
+			DatabaseFactory::reset();
+		}
+	}
+
+	public function testIspChangesAndUnusedDeletion(): void {
+		$rFrom = 1000000;
+		$this->assertNull(LineAuditAnalyzer::ispChange([['isp' => 'A', 'first_seen' => 900000, 'last_seen' => 1100000]], $rFrom));
+		$this->assertNull(LineAuditAnalyzer::ispChange([['isp' => 'New', 'first_seen' => 1000500, 'last_seen' => 1100000]], $rFrom));   // a new line
+		$this->assertSame(['kind' => 'moved', 'since' => 1000500, 'new' => ['B'], 'old' => ['A']],
+			LineAuditAnalyzer::ispChange([['isp' => 'A', 'first_seen' => 900000, 'last_seen' => 1000400], ['isp' => 'B', 'first_seen' => 1000500, 'last_seen' => 1100000]], $rFrom));
+		$this->assertSame('added', LineAuditAnalyzer::ispChange([['isp' => 'A', 'first_seen' => 900000, 'last_seen' => 1090000], ['isp' => 'B', 'first_seen' => 1000500, 'last_seen' => 1100000]], $rFrom)['kind']);
+
+		$rDb = new TestDb();
+		foreach (['lines', 'lines_live', 'lines_activity', 'lines_logs', 'users', 'streams'] as $rTable) {
+			$rDb->exec(InstallSchema::table($rTable));
+		}
+		foreach (array_filter(array_map('trim', explode(';', (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/line-audit_*')[0] . '/database.sql')))) as $rStatement) {
+			$rDb->exec($rStatement);
+		}
+		DatabaseFactory::set($rDb);
+		try {
+			$rNow = time();
+			$rOld = $rNow - 90 * 86400;
+			$rDb->query("INSERT INTO `lines` (`id`, `member_id`, `username`, `password`, `max_connections`, `exp_date`, `enabled`, `admin_enabled`, `last_activity`, `created_at`, `is_restreamer`, `is_mag`, `isp_desc`, `is_isplock`) VALUES
+				(1, 0, 'mover', 'x', 1, NULL, 1, 1, ?, ?, 0, 0, 'ISP Two', 0), (2, 0, 'gone', 'x', 1, NULL, 1, 1, ?, ?, 0, 0, '', 0),
+				(3, 0, 'magbox', 'x', 1, NULL, 1, 1, ?, ?, 0, 1, '', 0), (4, 0, 'busy', 'x', 1, NULL, 1, 1, ?, ?, 0, 0, '', 0)",
+				$rNow - 600, $rOld, $rOld, $rOld, $rOld, $rOld, $rNow - 60, $rOld);
+			// mover: a month on ISP One, then today on ISP Two only.
+			$rDb->query("INSERT INTO `lines_activity` (`user_id`, `stream_id`, `server_id`, `user_ip`, `isp`, `user_agent`, `date_start`, `date_end`) VALUES
+				(1, 1, 1, '10.0.0.1', 'ISP One', 'VLC', ?, ?), (1, 1, 1, '10.0.0.1', 'ISP One', 'VLC', ?, ?)", $rNow - 30 * 86400, $rNow - 30 * 86400 + 600, $rNow - 3 * 86400, $rNow - 3 * 86400 + 600);
+			$this->assertSame(2, LineAuditRepository::recordIsps($rNow - 7200, $rNow - 8100, []));   // first run: the whole log, and the line's current ISP
+			$rDb->query("INSERT INTO `lines_activity` (`user_id`, `stream_id`, `server_id`, `user_ip`, `isp`, `user_agent`, `date_start`, `date_end`) VALUES (1, 1, 1, '10.0.0.2', 'ISP Two', 'VLC', ?, ?)", $rNow - 3600, $rNow - 1800);
+			LineAuditRepository::recordIsps($rNow, $rNow - 900, []);
+			$this->assertSame(['ISP One', 'ISP Two'], array_column(LineAuditRepository::ispHistory($rNow - 86400)[1], 'isp'));
+			$rIsp = LineAuditPage::render(['view' => 'isp'], $rNow);
+			$this->assertStringContainsString('>mover</a>', $rIsp);
+			$this->assertStringContainsString('Moved', $rIsp);
+			$this->assertStringContainsString('ISP One', $rIsp);
+
+			// Unused: the delete control only for whoever may edit lines, never on a MAG line.
+			$this->assertStringNotContainsString('la-delete', LineAuditPage::render(['view' => 'unused'], $rNow));
+			$rUnused = LineAuditPage::render(['view' => 'unused', 'can_delete' => true], $rNow);
+			$this->assertStringContainsString('id="la-delete"', $rUnused);
+			$this->assertStringContainsString('value="2"', $rUnused);
+			$this->assertStringNotContainsString('value="3"', $rUnused);
+			$this->assertSame([[2], 3], LineAuditController::deletable([2, 3, 4, 1], $rNow));   // MAG, used a minute ago, in use: left alone
+			$this->assertSame([[], 0], LineAuditController::deletable([], $rNow));
 		} finally {
 			DatabaseFactory::reset();
 		}

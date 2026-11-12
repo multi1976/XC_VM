@@ -144,7 +144,11 @@ final class LineAuditAnalyzer {
 		// back and forth is not a phone moving from Wi-Fi to mobile data.
 		if ($rHandovers !== null && $rHandovers['returns'] >= self::HANDOVER_RETURNS) {
 			$rScore += $rHandovers['returns'] >= self::HANDOVER_RETURNS_MANY ? 4 : 2;
-			$rWhy[] = 'two places took it from each other ' . $rHandovers['returns'] . ' times (' . $rHandovers['handovers'] . ' handovers between IPs)';
+			$rWhy[] = 'two places took it from each other ' . $rHandovers['returns'] . ' times (' . $rHandovers['handovers'] . ' handovers between IPs'
+				. (($rHandovers['isp_returns'] ?? 0) > 0 ? ', ' . $rHandovers['isp_returns'] . ' of them between ISPs' : '') . ')';
+			if (($rHandovers['isp_returns'] ?? 0) >= self::HANDOVER_RETURNS) {
+				$rScore += 1;   // two providers: two homes, not one router given a new address
+			}
 		}
 		if ($rHistory !== null && $rHistory['countries'] >= 2) {
 			$rScore += 2;
@@ -190,6 +194,30 @@ final class LineAuditAnalyzer {
 			(int) ($rHistory['ips'] ?? 0) <= 1                  => 'one place: its connection or its player',
 			default                                            => 'a few IPs: a moving device, or look at the logs',
 		};
+	}
+
+	/**
+	 * A line that started coming from an ISP it never used before $rFrom, while
+	 * it had one before. Moved: the earlier ISPs are no longer used (a customer
+	 * who changed provider or moved house, or a line passed on). Added: they
+	 * still are (a second place).
+	 *
+	 * @param list<array{isp:string, first_seen:int, last_seen:int}> $rIsps
+	 * @return array{kind:string, since:int, new:list<string>, old:list<string>}|null
+	 */
+	public static function ispChange(array $rIsps, int $rFrom): ?array {
+		$rNew = array_values(array_filter($rIsps, static fn (array $i): bool => $i['first_seen'] >= $rFrom));
+		$rOld = array_values(array_filter($rIsps, static fn (array $i): bool => $i['first_seen'] < $rFrom));
+		if ($rNew === [] || $rOld === []) {
+			return null;
+		}
+		$rSince = min(array_column($rNew, 'first_seen'));
+		$rOldUsed = max(array_column($rOld, 'last_seen')) > $rSince + 300;
+		usort($rOld, static fn (array $a, array $b): int => $b['last_seen'] <=> $a['last_seen']);
+		return [
+			'kind' => $rOldUsed ? 'added' : 'moved', 'since' => $rSince,
+			'new' => array_column($rNew, 'isp'), 'old' => array_column($rOld, 'isp'),
+		];
 	}
 
 	/** Refusals that say the line itself is the problem (not a stream, not the server). */
