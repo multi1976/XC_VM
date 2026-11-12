@@ -9,6 +9,7 @@ use XcVm\Module\SourceHealth\ProviderImport;
 use XcVm\Module\SourceHealth\SourceAudit;
 use XcVm\Module\SourceHealth\SourceAuditPage;
 use XcVm\Module\SourceHealth\SourceHealthRepository;
+use XcVm\Module\SourceHealth\StreamHealth;
 use XcVm\Tests\Support\InstallSchema;
 
 /**
@@ -21,7 +22,7 @@ final class SourceAuditTest extends TestCase {
 		if ($rDir === null) {
 			self::markTestSkipped('The source-health module is not installed in this tree.');
 		}
-		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceAuditPage'] as $rClass) {
+		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceActions', 'StreamHealth', 'SourceAuditPage'] as $rClass) {
 			require_once $rDir . '/' . $rClass . '.php';
 		}
 	}
@@ -73,6 +74,27 @@ final class SourceAuditTest extends TestCase {
 		$this->assertSame([], SourceAudit::accountsToAsk($rDue, $rAccounts, $rNow));
 		$this->assertSame(['http://p.example/live/u/p/2.ts'], array_column(SourceAudit::admit($rDue, $rAccounts, $rNow), 'source'));
 		$this->assertSame([], SourceAudit::admit($rDue, [], $rNow));
+	}
+
+	public function testAStreamIsJudgedByItsSources(): void {
+		$rLevel = static fn (array $s): string => StreamHealth::assess($s)['level'];
+		$this->assertSame('no_working', $rLevel(['dead', 'down', 'pending']));
+		$this->assertSame('no_working', $rLevel(['dead']));
+		$this->assertSame('no_backup', $rLevel(['dead', 'on_air', 'down']));
+		$this->assertSame('mostly_off', $rLevel(['ok', 'dead', 'pending', 'down']));    // two of four off, a backup not checked yet
+		$this->assertSame('some_off', $rLevel(['on_air', 'ok', 'dead']));
+		$this->assertSame('healthy', $rLevel(['on_air', 'pending', 'skip']));
+		$rAhead = StreamHealth::assess(['dead', 'down', 'ok', 'dead']);
+		$this->assertSame([2, 2, 3, 1], [$rAhead['first_working'], $rAhead['off_before_working'], $rAhead['off'], $rAhead['working']]);
+
+		$rRows = [
+			['name' => 'B', 'health' => StreamHealth::assess(['ok', 'dead'])],
+			['name' => 'A', 'health' => StreamHealth::assess(['ok', 'dead', 'dead', 'ok'])],
+			['name' => 'C', 'health' => StreamHealth::assess(['dead'])],
+			['name' => 'D', 'health' => StreamHealth::assess(['ok', 'ok', 'ok', 'dead'])],
+		];
+		usort($rRows, [StreamHealth::class, 'compare']);
+		$this->assertSame(['C', 'B', 'A', 'D'], array_column($rRows, 'name'));          // worst level first; then the larger share off; then name
 	}
 
 	public function testIntervalsOrderAndTheCapPerProvider(): void {
@@ -193,6 +215,12 @@ final class SourceAuditTest extends TestCase {
 			$this->assertSame(2, substr_count($rHtml, '>Dead</span>'));
 			$this->assertStringContainsString('Recheck all shown (1)', $rHtml);
 			$this->assertStringContainsString('queued', $rHtml);
+			$rStreams = SourceAuditPage::render(['view' => 'streams'], 2000);
+			$this->assertStringContainsString('No working source', $rStreams);                    // Sport: its only source is dead
+			$this->assertStringContainsString('table-danger', $rStreams);
+			$this->assertMatchesRegularExpression('/Sport<\/a>.*?No working source/s', $rStreams);
+			$this->assertStringContainsString('Some off', $rStreams);                             // News: on air, ok and one dead
+			$this->assertStringNotContainsString('/u/p/', $rStreams);
 			$rFound = SourceAuditPage::render(['status' => 'all', 'q' => 'sport'], 2000);
 			$this->assertStringContainsString('Sport', $rFound);
 			$this->assertStringNotContainsString('>News<', $rFound);

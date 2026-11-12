@@ -21,8 +21,9 @@ final class SourceAuditPage {
 	/** @param array<string, mixed> $rQuery the page's GET parameters (status, host) */
 	public static function render(array $rQuery, int $rNow): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
-		$rView = in_array($rQuery['view'] ?? '', ['accounts', 'changes'], true) ? (string) $rQuery['view'] : 'sources';
+		$rView = in_array($rQuery['view'] ?? '', ['streams', 'accounts', 'changes'], true) ? (string) $rQuery['view'] : 'sources';
 		$rTabs = '<ul class="nav nav-tabs mb-3"><li class="nav-item"><a class="nav-link' . ($rView === 'sources' ? ' active' : '') . '" href="./source_audit">Sources</a></li>'
+			. '<li class="nav-item"><a class="nav-link' . ($rView === 'streams' ? ' active' : '') . '" href="./source_audit?view=streams">Streams</a></li>'
 			. '<li class="nav-item"><a class="nav-link' . ($rView === 'accounts' ? ' active' : '') . '" href="./source_audit?view=accounts">Provider accounts</a></li>'
 			. '<li class="nav-item"><a class="nav-link' . ($rView === 'changes' ? ' active' : '') . '" href="./source_audit?view=changes">Changes &amp; undo</a></li></ul>';
 		if ($rView === 'accounts') {
@@ -69,6 +70,10 @@ final class SourceAuditPage {
 				}
 				$rRows[] = ['stream' => $rStream, 'index' => $i, 'source' => $rSource, 'host' => $rHost, 'status' => $rStatus, 'audit' => $rAudit, 'account' => $rAccount];
 			}
+		}
+
+		if ($rView === 'streams') {
+			return $rTabs . self::streams($rRows, $rQuery) . self::actionScript();
 		}
 
 		$rWant = (string) ($rQuery['status'] ?? 'problems');
@@ -248,6 +253,107 @@ final class SourceAuditPage {
 JS;
 	}
 
+	private const STREAM_LEVELS = [
+		'no_working' => ['No working source', 'table-danger', 'bg-label-danger', 'Every checked source is off and none is up: the stream has nothing to play.'],
+		'no_backup'  => ['No backup', 'table-warning', 'bg-label-warning', 'One source works and every other is off: the next drop has nothing to fall back to.'],
+		'mostly_off' => ['Half or more off', 'table-warning', 'bg-label-warning', 'Half or more of the sources are off.'],
+		'some_off'   => ['Some off', '', 'bg-label-info', 'Some sources are off; others work.'],
+		'healthy'    => ['Healthy', '', 'bg-label-success', 'No source is off.'],
+	];
+	private const STRIP = [
+		'on_air' => ['#28c76f', 'on air'], 'ok' => ['#7bdcb5', 'ok'], 'dead' => ['#ea5455', 'dead'], 'down' => ['#ff9f43', 'down'],
+		'waiting' => ['#c9ccd3', 'waiting'], 'pending' => ['#c9ccd3', 'not checked yet'], 'skip' => ['#e9eaee', 'not http'],
+	];
+
+	/**
+	 * The Streams view: every live stream by the state of its sources, worst
+	 * first, the healthy ones left out unless asked for.
+	 *
+	 * @param list<array<string, mixed>> $rRows one per source, as the Sources view builds them
+	 * @param array<string, mixed> $rQuery
+	 */
+	private static function streams(array $rRows, array $rQuery): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rByStream = [];
+		foreach ($rRows as $r) {
+			$rID = (int) $r['stream']['id'];
+			$rByStream[$rID] ??= ['id' => $rID, 'name' => $r['stream']['name'], 'count' => count($r['stream']['sources']), 'sources' => []];
+			$rByStream[$rID]['sources'][] = ['index' => (int) $r['index'], 'status' => $r['status'], 'host' => $r['host'], 'hash' => md5($r['source']), 'reason' => (string) ($r['audit']['reason'] ?? '')];
+		}
+		$rCounts = array_fill_keys(StreamHealth::LEVELS, 0);
+		foreach ($rByStream as &$rStream) {
+			$rStream['health'] = StreamHealth::assess(array_column($rStream['sources'], 'status'));
+			$rCounts[$rStream['health']['level']]++;
+		}
+		unset($rStream);
+
+		$rWant = (string) ($rQuery['level'] ?? 'problems');
+		$rSearch = mb_substr(trim((string) ($rQuery['q'] ?? '')), 0, 100);
+		$rShown = array_values(array_filter($rByStream, static fn (array $s): bool =>
+			($rWant === 'all' || ($rWant === 'problems' ? $s['health']['level'] !== 'healthy' : $s['health']['level'] === $rWant))
+			&& ($rSearch === '' || mb_stripos($s['name'], $rSearch) !== false)));
+		usort($rShown, [StreamHealth::class, 'compare']);
+		$rLink = static fn (string $rLevel): string => './source_audit?view=streams&level=' . rawurlencode($rLevel) . ($rSearch !== '' ? '&q=' . rawurlencode($rSearch) : '');
+
+		$rHtml = '<p class="text-muted small">Every live stream by the state of its sources, as Source Audit last found them, the worst first. '
+			. 'The strip shows each source in list order: <span style="color:#28c76f">&#9632;</span> on air, <span style="color:#7bdcb5">&#9632;</span> ok, '
+			. '<span style="color:#ea5455">&#9632;</span> dead, <span style="color:#ff9f43">&#9632;</span> down, <span style="color:#c9ccd3">&#9632;</span> not checked yet. '
+			. 'Sources that are off ahead of the first working one make every failover wait on them: <em>Move off to end</em> puts them behind the working ones.</p>'
+			. '<form method="get" action="./source_audit" class="d-flex flex-wrap gap-2 mb-3" style="max-width:520px"><input type="hidden" name="view" value="streams">'
+			. '<input type="hidden" name="level" value="' . $h($rWant) . '">'
+			. '<input type="search" name="q" value="' . $h($rSearch) . '" class="form-control form-control-sm" style="flex:1;min-width:200px" placeholder="Search stream name">'
+			. '<button class="btn btn-sm btn-primary" type="submit">Search</button></form>';
+		$rHtml .= '<div class="d-flex flex-wrap gap-2 mb-3"><a href="' . $h($rLink('problems')) . '" class="badge bg-label-danger p-2' . ($rWant === 'problems' ? ' border border-dark' : '') . '">With problems: ' . (count($rByStream) - $rCounts['healthy']) . '</a>';
+		foreach (self::STREAM_LEVELS as $rLevel => [$rLabel, , $rBadge, $rTitle]) {
+			$rHtml .= '<a href="' . $h($rLink($rLevel)) . '" class="badge ' . $rBadge . ' p-2' . ($rWant === $rLevel ? ' border border-dark' : '') . '" title="' . $h($rTitle) . '">' . $h($rLabel) . ': ' . $rCounts[$rLevel] . '</a>';
+		}
+		$rHtml .= '<a href="' . $h($rLink('all')) . '" class="badge bg-label-dark p-2' . ($rWant === 'all' ? ' border border-dark' : '') . '">All: ' . count($rByStream) . '</a></div>';
+		if ($rShown === []) {
+			return $rHtml . '<p class="text-muted mb-0">Nothing to show for this filter.</p>';
+		}
+		$rHtml .= '<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>Stream</th><th>State</th><th>Sources</th>'
+			. '<th class="text-center">Off</th><th class="text-center">Working</th><th class="text-center">Not checked</th><th>First working</th><th></th></tr></thead><tbody>';
+		foreach (array_slice($rShown, 0, self::MAX_ROWS) as $s) {
+			$rHealth = $s['health'];
+			[$rLabel, $rRowClass, $rBadge, $rTitle] = self::STREAM_LEVELS[$rHealth['level']];
+			$rStrip = '';
+			foreach ($s['sources'] as $rSource) {
+				[$rColour, $rWhat] = self::STRIP[$rSource['status']] ?? ['#c9ccd3', $rSource['status']];
+				$rStrip .= '<span title="' . $h('#' . ($rSource['index'] + 1) . ' ' . $rSource['host'] . ': ' . $rWhat . ($rSource['reason'] !== '' ? ' — ' . $rSource['reason'] : '')) . '" '
+					. 'style="display:inline-block;width:14px;height:14px;border-radius:3px;margin-right:2px;background:' . $rColour . '"></span>';
+			}
+			$rOffItems = array_values(array_map(static fn (array $x): array => [$s['id'], $x['hash']], array_filter($s['sources'], static fn (array $x): bool => in_array($x['status'], ['dead', 'down'], true))));
+			$rMovable = $rHealth['off_before_working'] > 0;
+			// Worth moving only when an off source sits ahead of a working one.
+			$rLastWorking = -1;
+			foreach ($s['sources'] as $k => $x) {
+				if (in_array($x['status'], ['on_air', 'ok'], true)) {
+					$rLastWorking = $k;
+				}
+			}
+			$rAheadOfWorking = false;
+			foreach ($s['sources'] as $k => $x) {
+				$rAheadOfWorking = $rAheadOfWorking || ($k < $rLastWorking && in_array($x['status'], ['dead', 'down'], true));
+			}
+			$rHtml .= '<tr class="' . $rRowClass . '"><td><a href="./stream?id=' . $s['id'] . '" target="_blank" rel="noopener">' . $h($s['name']) . '</a>'
+				. ' <a class="small text-muted" href="./source_health?id=' . $s['id'] . '" target="_blank" rel="noopener" title="Source Health report">&#8599;</a></td>'
+				. '<td><span class="badge ' . $rBadge . '" title="' . $h($rTitle) . '">' . $h($rLabel) . '</span></td>'
+				. '<td style="white-space:nowrap">' . $rStrip . '</td>'
+				. '<td class="text-center">' . $rHealth['off'] . '<small class="text-muted">/' . $rHealth['total'] . '</small>'
+				. ($rHealth['off'] > 0 ? '<br><small class="text-muted">' . $rHealth['dead'] . ' dead · ' . $rHealth['down'] . ' down</small>' : '') . '</td>'
+				. '<td class="text-center">' . $rHealth['working'] . '</td>'
+				. '<td class="text-center' . ($rHealth['unknown'] === 0 ? ' text-muted' : '') . '">' . $rHealth['unknown'] . '</td>'
+				. '<td>' . ($rHealth['first_working'] === null ? '<span class="text-danger">none</span>'
+					: '#' . ($rHealth['first_working'] + 1) . ($rMovable ? ' <small class="text-warning" title="Sources that are off sit ahead of it in the list">(' . $rHealth['off_before_working'] . ' off before it)</small>' : '')) . '</td>'
+				. '<td>' . ($rOffItems !== [] && $rAheadOfWorking ? '<button type="button" class="btn btn-sm py-0 btn-outline-warning sa-act" data-do="move_end" data-items="' . $h(json_encode($rOffItems)) . '" title="Move this stream\'s dead and down sources to the end of its list">Move off to end</button>' : '') . '</td></tr>';
+		}
+		$rHtml .= '</tbody></table></div>';
+		if (count($rShown) > self::MAX_ROWS) {
+			$rHtml .= '<p class="text-muted small">Showing the first ' . self::MAX_ROWS . ' of ' . count($rShown) . '.</p>';
+		}
+		return $rHtml;
+	}
+
 	/** The Changes view: what was deleted or moved in the last UNDO_SEC, with Undo. */
 	private static function changes(int $rNow): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
@@ -292,7 +398,7 @@ JS;
 	document.querySelectorAll('.sa-act').forEach(function (b) {
 		b.addEventListener('click', function () {
 			var verb = b.dataset.do === 'delete' ? 'Delete' : 'Move to the end';
-			var params = {do: b.dataset.do, host: b.dataset.host || '', items: '[]'};
+			var params = {do: b.dataset.do, host: b.dataset.host || '', items: b.dataset.items || '[]'};
 			if (b.dataset.selected) {
 				params.items = JSON.stringify(picked().filter(function (c) { return b.dataset.do !== 'delete' || c.dataset.status === 'dead'; }).map(function (c) { return [+c.dataset.stream, c.dataset.hash]; }));
 			}
