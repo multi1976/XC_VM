@@ -16,6 +16,10 @@ use XcVm\Infrastructure\Database\DatabaseAware;
  *               but the panel tries the working ones first);
  *   - never the source on air, and a delete never leaves a stream without
  *     sources;
+ *   - add:      a channel of a Stream Provider picked in Find sources
+ *               (SourceFinder), its URL written here from the provider, never
+ *               taken from the page; first in the list when nothing in the
+ *               stream works, else last;
  *   - every change is logged with the source and its place, and can be undone
  *     for UNDO_SEC.
  *
@@ -156,9 +160,83 @@ final class SourceActions {
 		return ['batch' => $rBatch, 'streams' => count($rPlan['changes']), 'sources' => $rCount, 'refused' => $rPlan['refused']];
 	}
 
+	/** Sources one add may give one stream. */
+	public const ADD_PER_STREAM = 3;
+
+	/**
+	 * Add provider channels to streams.
+	 *
+	 * @param list<array{0:int, 1:int, 2:int}> $rItems [stream id, provider id, provider's channel id]
+	 * @return array{batch:string, streams:int, sources:int, refused:list<array{stream_id:int, name:string, source:string, why:string}>}
+	 */
+	public static function add(array $rItems, int $rUserID, int $rNow): array {
+		$rProviders = SourceFinder::providers();
+		$rState = SourceHealthRepository::auditState();
+		$rOnAir = array_flip(array_map(static fn (string $s): string => md5(trim($s)), SourceHealthRepository::onAirSources()));
+		$rByStream = [];
+		foreach ($rItems as [$rStreamID, $rProviderID, $rChannel]) {
+			$rByStream[(int) $rStreamID][] = [(int) $rProviderID, (int) $rChannel];
+		}
+		$rBatch = bin2hex(random_bytes(8));
+		$rRefused = [];
+		$rStreams = 0;
+		$rCount = 0;
+		foreach ($rByStream as $rStreamID => $rPicks) {
+			$rName = (string) self::db()->fetchValue('SELECT `stream_display_name` FROM `streams` WHERE `id` = ? AND `type` = 1', $rStreamID);
+			$rBefore = $rName === '' ? null : self::sources($rStreamID);
+			if ($rBefore === null) {
+				$rRefused[] = ['stream_id' => $rStreamID, 'name' => '#' . $rStreamID, 'source' => '', 'why' => 'no such live stream'];
+				continue;
+			}
+			$rName = SourceHealthRepository::raw($rName);
+			$rWorks = false;
+			$rHave = [];
+			foreach ($rBefore as $rSource) {
+				$rWorks = $rWorks || isset($rOnAir[md5($rSource)]) || (($rState[md5($rSource)]['status'] ?? '') === 'ok');
+				$rHave[SourceFinder::identity($rSource)] = true;
+			}
+			$rAfter = $rBefore;
+			$rAdded = [];
+			foreach (array_slice($rPicks, 0, self::ADD_PER_STREAM) as [$rProviderID, $rChannel]) {
+				$p = $rProviders[$rProviderID] ?? null;
+				$rListed = $p !== null && self::db()->fetchValue('SELECT COUNT(*) FROM `providers_streams` WHERE `provider_id` = ? AND `stream_id` = ? AND `type` = \'live\'', $rProviderID, $rChannel) > 0;
+				if (!$rListed) {
+					$rRefused[] = ['stream_id' => $rStreamID, 'name' => $rName, 'source' => '', 'why' => 'the provider or its channel is no longer listed'];
+					continue;
+				}
+				$rUrl = SourceFinder::url($p, $rChannel);
+				if (isset($rHave[SourceFinder::identity($rUrl)])) {
+					$rRefused[] = ['stream_id' => $rStreamID, 'name' => $rName, 'source' => $rUrl, 'why' => 'the stream has this channel already'];
+					continue;
+				}
+				$rHave[SourceFinder::identity($rUrl)] = true;
+				$rAt = $rWorks ? count($rAfter) : count($rAdded);
+				array_splice($rAfter, $rAt, 0, [$rUrl]);
+				$rAdded[] = ['source' => $rUrl, 'position' => $rAt];
+			}
+			if ($rAdded === []) {
+				continue;
+			}
+			if (!self::write($rStreamID, $rBefore, $rAfter)) {
+				$rRefused[] = ['stream_id' => $rStreamID, 'name' => $rName, 'source' => '', 'why' => 'the stream changed meanwhile: try again'];
+				continue;
+			}
+			foreach ($rAdded as $rItem) {
+				self::db()->query(
+					'INSERT INTO `source_health_actions` (`batch`, `created_at`, `user_id`, `stream_id`, `action`, `source`, `position`) VALUES (?, ?, ?, ?, ?, ?, ?)',
+					$rBatch, $rNow, $rUserID ?: null, $rStreamID, 'add', $rItem['source'], $rItem['position']
+				);
+				$rCount++;
+			}
+			$rStreams++;
+		}
+		return ['batch' => $rBatch, 'streams' => $rStreams, 'sources' => $rCount, 'refused' => $rRefused];
+	}
+
 	/**
 	 * Put a batch back: a deleted source returns to its place (if it is not in
-	 * the stream again already), a moved one to where it was.
+	 * the stream again already), a moved one to where it was, an added one
+	 * leaves the stream.
 	 *
 	 * @return array{streams:int, sources:int}
 	 */
@@ -179,6 +257,13 @@ final class SourceActions {
 			foreach ($rList as $rRow) {
 				$rSource = SourceHealthRepository::raw((string) $rRow['source']);
 				$rAt = array_search($rSource, $rAfter, true);
+				if ($rRow['action'] === 'add') {
+					if ($rAt !== false) {
+						array_splice($rAfter, (int) $rAt, 1);
+						$rSources++;
+					}
+					continue;
+				}
 				if ($rRow['action'] === 'move_end' && $rAt !== false) {
 					array_splice($rAfter, (int) $rAt, 1);
 				} elseif ($rRow['action'] === 'delete' && $rAt !== false) {

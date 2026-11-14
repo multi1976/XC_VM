@@ -41,7 +41,7 @@ class SourceHealthController extends BaseAjaxController {
 		$GLOBALS['_TITLE'] = 'Source Audit';
 		LayoutRenderer::renderHeader('admin');
 		try {
-			$rBody = SourceAuditPage::render(['status' => RequestManager::get('status', 'problems'), 'host' => RequestManager::get('host', ''), 'q' => RequestManager::get('q', ''), 'view' => RequestManager::get('view', '')], time());
+			$rBody = SourceAuditPage::render(['status' => RequestManager::get('status', 'problems'), 'host' => RequestManager::get('host', ''), 'q' => RequestManager::get('q', ''), 'view' => RequestManager::get('view', ''), 'level' => RequestManager::get('level', '')], time());
 		} catch (\Throwable $e) {
 			error_log('source-health audit: ' . $e->getMessage());
 			$rBody = '<p class="text-danger mb-0">The audit could not be shown: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES) . '</p>';
@@ -117,6 +117,26 @@ class SourceHealthController extends BaseAjaxController {
 			'changes' => array_map(static fn (array $c): array => ['name' => $c['name'], 'sources' => array_map(static fn (array $m): string => '#' . ($m['position'] + 1) . ' ' . SourceHealthTab::mask($m['source']), $c['moved'])], $rPlan['changes']),
 			'refused' => array_map($rMask, $rPlan['refused']),
 		]);
+	}
+
+	/** `api?action=source_audit_add` — add provider channels picked in Find sources; the URLs are written from the providers here. */
+	public function add(): never {
+		$this->requireXhr();
+		$this->gateAny([['adv', 'edit_stream']]);
+		$rItems = json_decode((string) RequestManager::get('items', '[]'), true);
+		if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST' || !is_array($rItems)) {
+			$this->fail();
+		}
+		$rItems = array_slice(array_values(array_filter(array_map(
+			static fn ($i): ?array => is_array($i) && count($i) === 3 && (int) $i[0] > 0 && (int) $i[1] > 0 && (int) $i[2] > 0 ? [(int) $i[0], (int) $i[1], (int) $i[2]] : null,
+			$rItems
+		))), 0, 3000);
+		if ($rItems === []) {
+			$this->fail(['message' => 'Nothing selected.']);
+		}
+		$rResult = SourceActions::add($rItems, (int) ($GLOBALS['rUserInfo']['id'] ?? 0), time());
+		$rResult['refused'] = array_map(static fn (array $r): array => ['name' => $r['name'], 'source' => $r['source'] !== '' ? SourceHealthTab::mask($r['source']) : '', 'why' => $r['why']], $rResult['refused']);
+		$this->ok($rResult);
 	}
 
 	/** `api?action=source_audit_undo` — put a batch of changes back. */

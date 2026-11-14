@@ -21,9 +21,10 @@ final class SourceAuditPage {
 	/** @param array<string, mixed> $rQuery the page's GET parameters (status, host) */
 	public static function render(array $rQuery, int $rNow): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
-		$rView = in_array($rQuery['view'] ?? '', ['streams', 'accounts', 'changes'], true) ? (string) $rQuery['view'] : 'sources';
+		$rView = in_array($rQuery['view'] ?? '', ['streams', 'find', 'accounts', 'changes'], true) ? (string) $rQuery['view'] : 'sources';
 		$rTabs = '<ul class="nav nav-tabs mb-3"><li class="nav-item"><a class="nav-link' . ($rView === 'sources' ? ' active' : '') . '" href="./source_audit">Sources</a></li>'
 			. '<li class="nav-item"><a class="nav-link' . ($rView === 'streams' ? ' active' : '') . '" href="./source_audit?view=streams">Streams</a></li>'
+			. '<li class="nav-item"><a class="nav-link' . ($rView === 'find' ? ' active' : '') . '" href="./source_audit?view=find">Find sources</a></li>'
 			. '<li class="nav-item"><a class="nav-link' . ($rView === 'accounts' ? ' active' : '') . '" href="./source_audit?view=accounts">Provider accounts</a></li>'
 			. '<li class="nav-item"><a class="nav-link' . ($rView === 'changes' ? ' active' : '') . '" href="./source_audit?view=changes">Changes &amp; undo</a></li></ul>';
 		if ($rView === 'accounts') {
@@ -74,6 +75,9 @@ final class SourceAuditPage {
 
 		if ($rView === 'streams') {
 			return $rTabs . self::streams($rRows, $rQuery) . self::actionScript();
+		}
+		if ($rView === 'find') {
+			return $rTabs . self::find($rRows, $rQuery, $rState, $rAccounts, $rNow);
 		}
 
 		$rWant = (string) ($rQuery['status'] ?? 'problems');
@@ -301,7 +305,7 @@ JS;
 		}
 		unset($rStream);
 
-		$rWant = (string) ($rQuery['level'] ?? 'problems');
+		$rWant = in_array($rQuery['level'] ?? '', array_merge(StreamHealth::LEVELS, ['problems', 'all']), true) ? (string) $rQuery['level'] : 'problems';
 		$rSearch = mb_substr(trim((string) ($rQuery['q'] ?? '')), 0, 100);
 		$rShown = array_values(array_filter($rByStream, static fn (array $s): bool =>
 			($rWant === 'all' || ($rWant === 'problems' ? $s['health']['level'] !== 'healthy' : $s['health']['level'] === $rWant))
@@ -369,19 +373,151 @@ JS;
 		return $rHtml;
 	}
 
+	/**
+	 * The Find sources view: streams with a problem and the channels of the
+	 * Stream Providers that carry their name (SourceFinder), to add.
+	 *
+	 * @param list<array<string, mixed>> $rRows one per source, as the Sources view builds them
+	 */
+	private static function find(array $rRows, array $rQuery, array $rState, array $rAccounts, int $rNow): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rByStream = [];
+		$rHost = [];
+		foreach ($rRows as $r) {
+			$rID = (int) $r['stream']['id'];
+			$rByStream[$rID] ??= ['id' => $rID, 'name' => $r['stream']['name'], 'sources' => $r['stream']['sources'], 'status' => []];
+			$rByStream[$rID]['status'][] = $r['status'];
+			if (in_array($r['status'], ['on_air', 'ok', 'dead', 'down'], true)) {
+				$rHost[$r['host']]['checked'] = ($rHost[$r['host']]['checked'] ?? 0) + 1;
+				$rHost[$r['host']]['working'] = ($rHost[$r['host']]['working'] ?? 0) + (in_array($r['status'], ['on_air', 'ok'], true) ? 1 : 0);
+			}
+		}
+		$rHostHealth = [];
+		foreach ($rHost as $rName => $c) {
+			if ($c['checked'] >= 5) {
+				$rHostHealth[(string) $rName] = $c['working'] / $c['checked'];
+			}
+		}
+		$rCounts = array_fill_keys(StreamHealth::LEVELS, 0);
+		foreach ($rByStream as &$rStream) {
+			$rStream['health'] = StreamHealth::assess($rStream['status']);
+			$rCounts[$rStream['health']['level']]++;
+		}
+		unset($rStream);
+
+		$rWant = in_array($rQuery['level'] ?? '', ['no_working', 'first_off', 'no_backup', 'problems', 'all'], true) ? (string) $rQuery['level'] : 'no_working';
+		$rSearch = mb_substr(trim((string) ($rQuery['q'] ?? '')), 0, 100);
+		$rShown = array_values(array_filter($rByStream, static fn (array $s): bool =>
+			($rWant === 'all' || ($rWant === 'problems' ? $s['health']['level'] !== 'healthy' : ($s['health']['level'] === $rWant || ($rWant === 'no_backup' && $s['health']['no_backup']))))
+			&& ($rSearch === '' || mb_stripos($s['name'], $rSearch) !== false)));
+		usort($rShown, [StreamHealth::class, 'compare']);
+		$rShown = array_slice($rShown, 0, self::MAX_ROWS);
+
+		$rProviders = SourceFinder::providers();
+		$rFound = SourceFinder::candidates($rShown, SourceFinder::channels(array_map(static fn (array $s): string => ProviderImport::normalizeName($s['name']), $rShown), $rProviders), $rProviders, $rState, $rAccounts, $rHostHealth, $rNow);
+		$rLink = static fn (string $rLevel): string => './source_audit?view=find&level=' . rawurlencode($rLevel) . ($rSearch !== '' ? '&q=' . rawurlencode($rSearch) : '');
+
+		$rHtml = '<p class="text-muted small">Channels of your <a href="./providers">Stream Providers</a> named like the stream: the same name once case, HD/FHD/4K, a country prefix (AL:, |AL|) and punctuation are taken off, never a near name. '
+			. 'Channels the stream already has, accounts the provider\'s API calls expired or refused, and sources the audit found dead are left out. '
+			. 'Best first: an account with a connection to spare, then the provider whose checked sources work best. '
+			. 'Only providers whose channel list the core has fetched are searched (Stream Providers, synced hourly). '
+			. 'An added source goes first in a stream where nothing works, last otherwise; Changes &amp; undo takes it out again. Check the name before adding: two channels can share one.</p>'
+			. '<form method="get" action="./source_audit" class="d-flex flex-wrap gap-2 mb-3" style="max-width:520px"><input type="hidden" name="view" value="find">'
+			. '<input type="hidden" name="level" value="' . $h($rWant) . '">'
+			. '<input type="search" name="q" value="' . $h($rSearch) . '" class="form-control form-control-sm" style="flex:1;min-width:200px" placeholder="Search stream name">'
+			. '<button class="btn btn-sm btn-primary" type="submit">Search</button></form>';
+		$rHtml .= '<div class="d-flex flex-wrap gap-2 mb-3">';
+		foreach (['no_working' => $rCounts['no_working'], 'first_off' => $rCounts['first_off'], 'no_backup' => $rCounts['no_backup']] as $rLevel => $rN) {
+			$rHtml .= '<a href="' . $h($rLink($rLevel)) . '" class="badge ' . self::STREAM_LEVELS[$rLevel][2] . ' p-2' . ($rWant === $rLevel ? ' border border-dark' : '') . '">' . $h(self::STREAM_LEVELS[$rLevel][0]) . ($rLevel === 'no_backup' ? '' : ': ' . $rN) . '</a>';
+		}
+		$rHtml .= '<a href="' . $h($rLink('problems')) . '" class="badge bg-label-danger p-2' . ($rWant === 'problems' ? ' border border-dark' : '') . '">With problems</a>'
+			. '<a href="' . $h($rLink('all')) . '" class="badge bg-label-dark p-2' . ($rWant === 'all' ? ' border border-dark' : '') . '">All streams</a></div>';
+		if ($rProviders === []) {
+			return $rHtml . '<p class="text-muted mb-0">No enabled Stream Provider with a channel list yet. Add the accounts from <a href="./source_audit?view=accounts">Provider accounts</a>; the core fetches their lists within the hour.</p>';
+		}
+		$rHtml .= '<p class="small mb-2"><strong>' . count($rFound) . '</strong> of ' . count($rShown) . ' stream(s) shown have a channel to offer; the other '
+			. (count($rShown) - count($rFound)) . ' have none in ' . count($rProviders) . ' provider list(s).</p>';
+		if ($rFound === []) {
+			return $rHtml;
+		}
+		$rHtml .= '<div class="d-flex flex-wrap gap-2 align-items-center mb-2">'
+			. '<button type="button" class="btn btn-sm btn-outline-primary" id="sa-find-best">Pick the best one for each</button>'
+			. '<button type="button" class="btn btn-sm btn-primary" id="sa-find-add" disabled>Add selected</button>'
+			. '<small class="text-muted">At most ' . SourceActions::ADD_PER_STREAM . ' per stream at a time.</small></div>';
+		$rHtml .= '<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>Stream</th><th>State</th><th>Sources now</th><th>Channels found</th></tr></thead><tbody>';
+		foreach ($rShown as $s) {
+			if (!isset($rFound[$s['id']])) {
+				continue;
+			}
+			[$rLabel, $rRowClass, $rBadge] = self::STREAM_LEVELS[$s['health']['level']];
+			$rStrip = '';
+			foreach ($s['status'] as $rStatus) {
+				$rStrip .= '<span title="' . $h(self::STRIP[$rStatus][1] ?? $rStatus) . '" style="display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:2px;background:' . (self::STRIP[$rStatus][0] ?? '#c9ccd3') . '"></span>';
+			}
+			$rCands = '';
+			foreach ($rFound[$s['id']] as $i => $c) {
+				$rFull = $c['spare'] !== null && $c['spare'] <= 0;
+				$rCands .= '<div class="form-check mb-1"><input class="form-check-input sa-find" type="checkbox" id="saf-' . $s['id'] . '-' . $i . '" data-rank="' . $i . '" data-stream="' . $s['id'] . '" '
+					. 'data-item="' . $h(json_encode([$s['id'], $c['provider'], $c['channel']])) . '">'
+					. '<label class="form-check-label small" for="saf-' . $s['id'] . '-' . $i . '"><strong>' . $h($c['provider_name']) . '</strong> — ' . $h($c['name'])
+					. ' <span class="text-muted">#' . $c['channel'] . '</span>'
+					. ($c['max'] !== null ? ' · <span class="' . ($rFull ? 'text-danger' : 'text-muted') . '" title="connections in use / allowed on the account">' . $c['active'] . '/' . $c['max'] . ($rFull ? ' full' : '') . '</span>' : '')
+					. ($c['health'] !== null ? ' · <span class="text-muted" title="share of this provider\'s checked sources that work">' . (int) round($c['health'] * 100) . '% of its sources work</span>' : '')
+					. ($c['note'] !== '' ? ' · <span class="text-success">' . $h($c['note']) . '</span>' : '') . '</label></div>';
+			}
+			$rHtml .= '<tr class="' . $rRowClass . '"><td><a href="./stream?id=' . $s['id'] . '" target="_blank" rel="noopener">' . $h($s['name']) . '</a></td>'
+				. '<td><span class="badge ' . $rBadge . '">' . $h($rLabel) . '</span></td><td style="white-space:nowrap">' . $rStrip . '</td><td>' . $rCands . '</td></tr>';
+		}
+		return $rHtml . '</tbody></table></div>' . self::findScript();
+	}
+
+	/** Pick, confirm, add through `api?action=source_audit_add`, then reload. */
+	private static function findScript(): string {
+		return <<<'JS'
+<script>
+(function () {
+	var boxes = Array.prototype.slice.call(document.querySelectorAll('.sa-find'));
+	var add = document.getElementById('sa-find-add'), best = document.getElementById('sa-find-best');
+	function picked() { return boxes.filter(function (c) { return c.checked; }); }
+	function sync() { var n = picked().length; add.disabled = n === 0; add.textContent = 'Add selected' + (n ? ' (' + n + ')' : ''); }
+	boxes.forEach(function (c) { c.addEventListener('change', sync); });
+	best.addEventListener('click', function () { boxes.forEach(function (c) { c.checked = c.dataset.rank === '0'; }); sync(); });
+	add.addEventListener('click', function () {
+		var p = picked(), streams = {};
+		p.forEach(function (c) { streams[c.dataset.stream] = 1; });
+		if (!p.length || !window.confirm('Add ' + p.length + ' source(s) to ' + Object.keys(streams).length + ' stream(s)? Changes & undo can take them out again.')) { return; }
+		add.disabled = true;
+		jQuery.post('./api?action=source_audit_add', {items: JSON.stringify(p.map(function (c) { return JSON.parse(c.dataset.item); }))}, function (r) {
+			if (!r || r.result !== true) { window.alert((r && r.message) || 'Nothing was added.'); add.disabled = false; return; }
+			var why = {};
+			(r.refused || []).forEach(function (x) { why[x.why] = (why[x.why] || 0) + 1; });
+			var left = Object.keys(why).map(function (k) { return '  - ' + why[k] + '× ' + k; });
+			window.alert(r.sources + ' source(s) added to ' + r.streams + ' stream(s).' + (left.length ? String.fromCharCode(10) + 'Not added:' + String.fromCharCode(10) + left.join(String.fromCharCode(10)) : ''));
+			window.location.reload();
+		}, 'json').fail(function () { window.alert('The request failed.'); add.disabled = false; });
+	});
+})();
+</script>
+JS;
+	}
+
 	/** The Changes view: what was deleted or moved in the last UNDO_SEC, with Undo. */
 	private static function changes(int $rNow): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rRows = SourceActions::history($rNow);
-		$rHtml = '<p class="text-muted small">Sources deleted from, or moved to the end of, their streams from this page in the last ' . intdiv(SourceActions::UNDO_SEC, 86400) . ' days. '
-			. 'Undo puts them back where they were (a deleted source is not added twice if it is in the stream again). Older entries are forgotten.</p>';
+		$rHtml = '<p class="text-muted small">Sources deleted from, moved to the end of, or added to their streams from this page in the last ' . intdiv(SourceActions::UNDO_SEC, 86400) . ' days. '
+			. 'Undo puts them back where they were (a deleted source is not added twice if it is in the stream again; an added one is taken out). Older entries are forgotten.</p>';
 		if ($rRows === []) {
 			return $rHtml . '<p class="text-muted mb-0">No changes.</p>';
 		}
 		$rHtml .= '<div class="table-responsive"><table class="table table-sm"><thead><tr><th>When</th><th>Change</th><th class="text-center">Streams</th><th class="text-center">Sources</th><th>By</th><th></th></tr></thead><tbody>';
 		foreach ($rRows as $r) {
 			$rHtml .= '<tr><td>' . $h(date('Y-m-d H:i', $r['created_at'])) . '</td>'
-				. '<td>' . ($r['action'] === 'delete' ? '<span class="badge bg-label-danger">deleted</span>' : '<span class="badge bg-label-warning">moved to end</span>') . '</td>'
+				. '<td>' . match ($r['action']) {
+					'delete' => '<span class="badge bg-label-danger">deleted</span>',
+					'add'    => '<span class="badge bg-label-success">added</span>',
+					default  => '<span class="badge bg-label-warning">moved to end</span>',
+				} . '</td>'
 				. '<td class="text-center">' . $r['streams'] . '</td><td class="text-center">' . $r['sources'] . '</td>'
 				. '<td><small class="text-muted">' . ($r['user_id'] !== null ? 'user #' . $r['user_id'] : '–') . '</small></td>'
 				. '<td>' . ($r['undone_at'] !== null ? '<small class="text-muted">undone ' . $h(date('Y-m-d H:i', $r['undone_at'])) . '</small>'

@@ -7,6 +7,8 @@ use XcVm\Core\Events\EventDispatcher;
 use XcVm\Core\Events\Stream\StreamsChangedEvent;
 use XcVm\Infrastructure\Database\DatabaseFactory;
 use XcVm\Module\SourceHealth\SourceActions;
+use XcVm\Module\SourceHealth\SourceAuditPage;
+use XcVm\Module\SourceHealth\SourceFinder;
 use XcVm\Module\SourceHealth\SourceHealthRepository;
 use XcVm\Tests\Support\InstallSchema;
 
@@ -25,7 +27,7 @@ final class SourceActionsTest extends TestCase {
 		if ($rDir === null) {
 			self::markTestSkipped('The source-health module is not installed in this tree.');
 		}
-		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceActions'] as $rClass) {
+		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceActions', 'SourceFinder', 'StreamHealth', 'SourceAuditPage'] as $rClass) {
 			require_once $rDir . '/' . $rClass . '.php';
 		}
 	}
@@ -125,6 +127,64 @@ final class SourceActionsTest extends TestCase {
 
 			// Entries older than the undo window are forgotten.
 			$this->assertSame([], SourceActions::history($rNow + SourceActions::UNDO_SEC + 10));
+		} finally {
+			EventDispatcher::clear();
+			DatabaseFactory::reset();
+		}
+	}
+
+	public function testFindSourcesOffersAndAddsProviderChannelsAndUndoTakesThemOut(): void {
+		$rP = ['id' => 4, 'name' => 'Prov', 'host' => 'p.example', 'ip' => 'p.example', 'port' => 8080, 'user' => 'u', 'pass' => 'pw', 'ssl' => false, 'hls' => false, 'legacy' => true, 'max' => 10, 'active' => 2, 'exp' => null];
+		$rQ = ['id' => 5, 'name' => 'Full', 'host' => 'q.example', 'ip' => 'q.example', 'port' => 80, 'user' => 'v', 'pass' => 'pw', 'ssl' => true, 'hls' => false, 'legacy' => false, 'max' => 1, 'active' => 1, 'exp' => null];
+		$this->assertSame('http://p.example:8080/live/u/pw/77.ts', SourceFinder::url($rP, 77));
+		$this->assertSame(SourceFinder::identity('http://p.example:8080/live/u/pw/77.ts'), SourceFinder::identity('http://p.example:8080/u/pw/77'));
+
+		$rChannels = ['tring sport 2' => [
+			['provider' => 5, 'channel' => 9, 'name' => 'AL: Tring Sport 2'],
+			['provider' => 4, 'channel' => 77, 'name' => 'Tring Sport 2 HD'],
+			['provider' => 4, 'channel' => 78, 'name' => 'TRING SPORT 2'],
+			['provider' => 9, 'channel' => 1, 'name' => 'Tring Sport 2'],           // a provider that is disabled
+		]];
+		$rStreams = [['id' => 1, 'name' => 'Tring Sport 2', 'sources' => ['http://p.example:8080/u/pw/78']], ['id' => 2, 'name' => 'Sport 2', 'sources' => []]];
+		$rFound = SourceFinder::candidates($rStreams, $rChannels, [4 => $rP, 5 => $rQ], [], [], ['q.example' => 0.9, 'p.example' => 0.4], time());
+		$this->assertSame([1], array_keys($rFound));                                                       // "Sport 2" is not "Tring Sport 2"
+		$this->assertSame([[4, 77], [5, 9]], array_map(static fn (array $c): array => [$c['provider'], $c['channel']], $rFound[1]));   // 78 it has; a full account last
+		$rDead = SourceFinder::candidates($rStreams, $rChannels, [4 => $rP], [md5('http://p.example:8080/live/u/pw/77.ts') => ['status' => 'dead']], [], [], time());
+		$this->assertSame([], $rDead);
+
+		$rDb = new TestDb();
+		foreach (['streams', 'streams_servers', 'providers', 'providers_streams'] as $rTable) {
+			$rDb->exec(InstallSchema::table($rTable));
+		}
+		foreach (array_filter(array_map('trim', explode(';', (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/source-health_*')[0] . '/database.sql')))) as $rStatement) {
+			$rDb->exec($rStatement);
+		}
+		DatabaseFactory::set($rDb);
+		try {
+			$rNow = time();
+			$rDb->query("INSERT INTO `providers` (`id`, `name`, `ip`, `port`, `username`, `password`, `data`, `enabled`, `status`, `ssl`, `hls`, `legacy`) VALUES (4, 'Prov', 'p.example', 8080, 'u', 'pw', ?, 1, 1, 0, 0, 1)",
+				json_encode(['max_connections' => 10, 'active_connections' => 2, 'streams' => 2]));
+			$rDb->query("INSERT INTO `providers_streams` (`provider_id`, `stream_id`, `stream_display_name`, `type`) VALUES (4, 77, 'Tring Sport 2 HD', 'live'), (4, 50, 'News 24', 'live')");
+			$rDb->query("INSERT INTO `streams` (`id`, `type`, `stream_display_name`, `stream_source`) VALUES (1, 1, 'Tring Sport 2', ?), (2, 1, 'News 24', ?)",
+				json_encode([self::A]), json_encode([self::B]));
+			$rDb->query("INSERT INTO `streams_servers` (`stream_id`, `server_id`, `pid`, `stream_status`, `current_source`) VALUES (2, 1, 10, 0, ?)", self::B);
+			SourceHealthRepository::saveAudit(md5(self::A), 'a.example', ['status' => 'dead', 'kind' => null, 'reason' => '', 'fails' => 3, 'first_fail' => $rNow - 86400, 'last_ok' => 0], null, $rNow - 60);
+			$rSources = static fn (int $rID): array => json_decode((string) $rDb->fetchValue('SELECT `stream_source` FROM `streams` WHERE `id` = ?', $rID), true);
+
+			$rPage = SourceAuditPage::render(['view' => 'find', 'level' => 'problems'], $rNow);
+			$this->assertStringContainsString('Tring Sport 2 HD', $rPage);
+			$this->assertStringContainsString('data-item="[1,4,77]"', $rPage);
+			$this->assertStringNotContainsString('pw', $rPage);                                               // no account in the page
+
+			// Nothing in stream 1 works: the new source goes first. Stream 2 is on air: it goes last.
+			$rAdd = SourceActions::add([[1, 4, 77], [2, 4, 50], [1, 4, 77], [2, 4, 999]], 7, $rNow);
+			$this->assertSame([2, 2], [$rAdd['streams'], $rAdd['sources']]);
+			$this->assertSame(['the stream has this channel already', 'the provider or its channel is no longer listed'], array_column($rAdd['refused'], 'why'));
+			$this->assertSame(['http://p.example:8080/live/u/pw/77.ts', self::A], $rSources(1));
+			$this->assertSame([self::B, 'http://p.example:8080/live/u/pw/50.ts'], $rSources(2));
+			$this->assertSame('add', SourceActions::history($rNow)[0]['action']);
+			$this->assertSame(['streams' => 2, 'sources' => 2], SourceActions::undo($rAdd['batch'], $rNow));
+			$this->assertSame([[self::A], [self::B]], [$rSources(1), $rSources(2)]);
 		} finally {
 			EventDispatcher::clear();
 			DatabaseFactory::reset();

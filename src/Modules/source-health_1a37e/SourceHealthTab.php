@@ -50,7 +50,8 @@ final class SourceHealthTab {
 			return self::note('The report could not be built: ' . $e->getMessage());
 		}
 
-		$rOpen = $rFullPage ? '' : '<p class="mb-2"><a href="./source_health?id=' . (int) $rStream['id'] . '" target="_blank" rel="noopener">Open this report as a full page ↗</a></p>';
+		$rFind = '<a href="./source_audit?view=find&amp;level=all&amp;q=' . rawurlencode(SourceHealthRepository::raw((string) ($rStream['stream_display_name'] ?? ''))) . '" target="_blank" rel="noopener">Find other sources for this stream ↗</a>';
+		$rOpen = '<p class="mb-2">' . ($rFullPage ? '' : '<a href="./source_health?id=' . (int) $rStream['id'] . '" target="_blank" rel="noopener">Open this report as a full page ↗</a> · ') . $rFind . '</p>';
 		return $rOpen . self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow, $rAccounts, $rAccountInfo) . self::timeline($rRows, $rFrom, $rNow) . self::runSection($rRows) . self::errorSection($rRows, $rErrors);
 	}
 
