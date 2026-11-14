@@ -295,7 +295,7 @@ JS;
 		$rByStream = [];
 		foreach ($rRows as $r) {
 			$rID = (int) $r['stream']['id'];
-			$rByStream[$rID] ??= ['id' => $rID, 'name' => $r['stream']['name'], 'count' => count($r['stream']['sources']), 'sources' => []];
+			$rByStream[$rID] ??= ['id' => $rID, 'name' => $r['stream']['name'], 'count' => count($r['stream']['sources']), 'sources' => [], 'all_sources' => $r['stream']['sources']];
 			$rByStream[$rID]['sources'][] = ['index' => (int) $r['index'], 'status' => $r['status'], 'host' => $r['host'], 'hash' => md5($r['source']), 'reason' => (string) ($r['audit']['reason'] ?? '')];
 		}
 		$rCounts = array_fill_keys(StreamHealth::LEVELS, 0);
@@ -356,7 +356,8 @@ JS;
 			$rHtml .= '<tr class="' . $rRowClass . '"><td><a href="./stream?id=' . $s['id'] . '" target="_blank" rel="noopener">' . $h($s['name']) . '</a>'
 				. ' <a class="small text-muted" href="./source_health?id=' . $s['id'] . '" target="_blank" rel="noopener" title="Source Health report">&#8599;</a></td>'
 				. '<td><span class="badge ' . $rBadge . '" title="' . $h($rTitle) . '">' . $h($rLabel) . '</span>'
-				. ($rHealth['level'] !== 'no_backup' && $rHealth['no_backup'] ? ' <span class="badge bg-label-warning" title="' . $h(self::STREAM_LEVELS['no_backup'][3]) . '">No backup</span>' : '') . '</td>'
+				. ($rHealth['level'] !== 'no_backup' && $rHealth['no_backup'] ? ' <span class="badge bg-label-warning" title="' . $h(self::STREAM_LEVELS['no_backup'][3]) . '">No backup</span>' : '')
+				. self::sharedLogins($s['all_sources']) . '</td>'
 				. '<td style="white-space:nowrap">' . $rStrip . '</td>'
 				. '<td class="text-center">' . $rHealth['off'] . '<small class="text-muted">/' . $rHealth['total'] . '</small>'
 				. ($rHealth['off'] > 0 ? '<br><small class="text-muted">' . $rHealth['dead'] . ' dead · ' . $rHealth['down'] . ' down</small>' : '') . '</td>'
@@ -371,6 +372,31 @@ JS;
 			$rHtml .= '<p class="text-muted small">Showing the first ' . self::MAX_ROWS . ' of ' . count($rShown) . '.</p>';
 		}
 		return $rHtml;
+	}
+
+	/**
+	 * Sources of one stream on one login (user and password), on one domain or
+	 * several: one account, one connection limit, down together. Not backups
+	 * of each other.
+	 *
+	 * @param list<string> $rSources
+	 */
+	private static function sharedLogins(array $rSources): string {
+		$rBy = [];
+		foreach ($rSources as $i => $rSource) {
+			$rLogin = SourceFinder::login((string) $rSource);
+			if ($rLogin !== null) {
+				$rBy[$rLogin][] = '#' . ($i + 1);
+			}
+		}
+		$rOut = '';
+		foreach ($rBy as $rList) {
+			if (count($rList) > 1) {
+				$rText = 'Sources ' . implode(', ', $rList) . ' log in with the same user and password (on one domain or several): one account, one connection limit, down together. They are not backups of each other.';
+				$rOut .= ' <span class="badge bg-label-warning" title="' . htmlspecialchars($rText, ENT_QUOTES) . '">one account: ' . htmlspecialchars(implode(' ', $rList), ENT_QUOTES) . '</span>';
+			}
+		}
+		return $rOut;
 	}
 
 	/**
@@ -420,6 +446,7 @@ JS;
 		$rHtml = '<p class="text-muted small">Channels of your <a href="./providers">Stream Providers</a> named like the stream: the same name once case, HD/FHD/4K, a country prefix (AL:, |AL|) and punctuation are taken off, never a near name. '
 			. 'Channels the stream already has, accounts the provider\'s API calls expired or refused, and sources the audit found dead are left out. '
 			. 'Best first: an account with a connection to spare, then the provider whose checked sources work best. '
+			. 'A channel on a login the stream already uses (the same user and password, even through another domain) is marked <em>not a real backup</em> and comes last: it shares that account\'s connection limit and goes down with it. '
 			. 'Only providers whose channel list the core has fetched are searched (Stream Providers, synced hourly). '
 			. 'An added source goes first in a stream where nothing works, last otherwise; Changes &amp; undo takes it out again. Check the name before adding: two channels can share one.</p>'
 			. '<form method="get" action="./source_audit" class="d-flex flex-wrap gap-2 mb-3" style="max-width:520px"><input type="hidden" name="view" value="find">'
@@ -463,7 +490,8 @@ JS;
 					. ' <span class="text-muted">#' . $c['channel'] . '</span>'
 					. ($c['max'] !== null ? ' · <span class="' . ($rFull ? 'text-danger' : 'text-muted') . '" title="connections in use / allowed on the account">' . $c['active'] . '/' . $c['max'] . ($rFull ? ' full' : '') . '</span>' : '')
 					. ($c['health'] !== null ? ' · <span class="text-muted" title="share of this provider\'s checked sources that work">' . (int) round($c['health'] * 100) . '% of its sources work</span>' : '')
-					. ($c['note'] !== '' ? ' · <span class="text-success">' . $h($c['note']) . '</span>' : '') . '</label></div>';
+					. ($c['note'] !== '' ? ' · <span class="text-success">' . $h($c['note']) . '</span>' : '')
+					. ($c['same'] !== '' ? '<br><span class="badge bg-label-warning" title="' . $h($c['same']) . '">not a real backup</span> <small class="text-warning">' . $h($c['same']) . '</small>' : '') . '</label></div>';
 			}
 			$rHtml .= '<tr class="' . $rRowClass . '"><td><a href="./stream?id=' . $s['id'] . '" target="_blank" rel="noopener">' . $h($s['name']) . '</a></td>'
 				. '<td><span class="badge ' . $rBadge . '">' . $h($rLabel) . '</span></td><td style="white-space:nowrap">' . $rStrip . '</td><td>' . $rCands . '</td></tr>';

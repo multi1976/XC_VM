@@ -148,9 +148,23 @@ final class SourceActionsTest extends TestCase {
 		$rStreams = [['id' => 1, 'name' => 'Tring Sport 2', 'sources' => ['http://p.example:8080/u/pw/78']], ['id' => 2, 'name' => 'Sport 2', 'sources' => []]];
 		$rFound = SourceFinder::candidates($rStreams, $rChannels, [4 => $rP, 5 => $rQ], [], [], ['q.example' => 0.9, 'p.example' => 0.4], time());
 		$this->assertSame([1], array_keys($rFound));                                                       // "Sport 2" is not "Tring Sport 2"
-		$this->assertSame([[4, 77], [5, 9]], array_map(static fn (array $c): array => [$c['provider'], $c['channel']], $rFound[1]));   // 78 it has; a full account last
+		$this->assertSame([[5, 9], [4, 77]], array_map(static fn (array $c): array => [$c['provider'], $c['channel']], $rFound[1]));   // 78 it has; 77 is on its own account: after a full but independent one
 		$rDead = SourceFinder::candidates($rStreams, $rChannels, [4 => $rP], [md5('http://p.example:8080/live/u/pw/77.ts') => ['status' => 'dead']], [], [], time());
 		$this->assertSame([], $rDead);
+
+		// One login on two domains is one account: offered, marked, ranked last; one channel of it offered once.
+		$rM = ['id' => 6, 'name' => 'Max', 'host' => 'my.max.example', 'ip' => 'my.max.example', 'port' => 8080, 'user' => 'world', 'pass' => 'pw', 'ssl' => false, 'hls' => false, 'legacy' => true, 'max' => 80, 'active' => 10, 'exp' => null];
+		$rC = ['id' => 7, 'name' => 'Cyber', 'host' => 'cyber.example', 'ip' => 'cyber.example', 'port' => 8080, 'user' => 'World', 'pass' => 'pw', 'ssl' => false, 'hls' => false, 'legacy' => true, 'max' => 80, 'active' => 10, 'exp' => null];
+		$rD = ['id' => 8, 'name' => 'Cyber2', 'host' => 'cyber2.example', 'ip' => 'cyber2.example', 'port' => 80, 'user' => 'world', 'pass' => 'pw', 'ssl' => false, 'hls' => false, 'legacy' => true, 'max' => 80, 'active' => 10, 'exp' => null];
+		$rOwn = ['klan news' => [
+			['provider' => 7, 'channel' => 1139, 'name' => 'Klan News'], ['provider' => 8, 'channel' => 1139, 'name' => 'Klan News'],
+			['provider' => 6, 'channel' => 2250, 'name' => 'Klan News HD'], ['provider' => 4, 'channel' => 5, 'name' => 'Klan News'],
+		]];
+		$rFound = SourceFinder::candidates([['id' => 3, 'name' => 'Klan News', 'sources' => [self::A, 'http://my.max.example:8080/live/world/pw/1139.ts']]], $rOwn, [4 => $rP, 6 => $rM, 7 => $rC, 8 => $rD], [], [], [], time());
+		$this->assertSame([4, ''], [$rFound[3][0]['provider'], $rFound[3][0]['same']]);                    // the independent one first
+		$rSame = array_column(array_slice($rFound[3], 1), 'same', 'provider');
+		ksort($rSame);
+		$this->assertSame([6 => 'same account as source #2 (another channel id): shares its connection limit', 7 => 'same account as source #2 on another domain or port: shares its connection limit and falls with it'], $rSame);
 
 		$rDb = new TestDb();
 		foreach (['streams', 'streams_servers', 'providers', 'providers_streams'] as $rTable) {
@@ -177,6 +191,9 @@ final class SourceActionsTest extends TestCase {
 			$this->assertStringNotContainsString('pw', $rPage);                                               // no account in the page
 
 			// Nothing in stream 1 works: the new source goes first. Stream 2 is on air: it goes last.
+			$rDb->query("INSERT INTO `streams` (`id`, `type`, `stream_display_name`, `stream_source`) VALUES (3, 1, 'Twice', ?)", json_encode(['http://x.example/live/me/pw/1.ts', 'http://y.example:8080/me/pw/1']));
+			$this->assertStringContainsString('one account: #1 #2', SourceAuditPage::render(['view' => 'streams', 'level' => 'all'], $rNow));
+			$rDb->query('DELETE FROM `streams` WHERE `id` = 3');
 			$rAdd = SourceActions::add([[1, 4, 77], [2, 4, 50], [1, 4, 77], [2, 4, 999]], 7, $rNow);
 			$this->assertSame([2, 2], [$rAdd['streams'], $rAdd['sources']]);
 			$this->assertSame(['the stream has this channel already', 'the provider or its channel is no longer listed'], array_column($rAdd['refused'], 'why'));

@@ -19,6 +19,13 @@ use XcVm\Infrastructure\Database\DatabaseAware;
  * account with a connection to spare first, then the provider whose checked
  * sources work best.
  *
+ * A login (user and password) the stream already uses is one account even on
+ * another domain or port: providers reach one panel through several names.
+ * Such a channel is offered, but marked and ranked after the independent
+ * ones: it shares that account's connection limit and falls with it, so it is
+ * no real backup. Two offers of one login on two domains for one channel are
+ * the same stream: only the better one is kept.
+ *
  * Read-only; SourceActions::add() adds what is picked.
  */
 final class SourceFinder {
@@ -92,7 +99,7 @@ final class SourceFinder {
 	 * @param array<string, array<string, mixed>> $rAudit audit state by md5(source)
 	 * @param array<string, array<string, mixed>> $rAccounts account answers by md5(account key)
 	 * @param array<string, float> $rHostHealth host => share of its checked sources that work
-	 * @return array<int, list<array{provider:int, provider_name:string, channel:int, name:string, url:string, max:?int, active:int, spare:?int, health:?float, note:string}>>
+	 * @return array<int, list<array{provider:int, provider_name:string, channel:int, name:string, url:string, max:?int, active:int, spare:?int, health:?float, note:string, same:string}>>
 	 */
 	public static function candidates(array $rStreams, array $rChannels, array $rProviders, array $rAudit, array $rAccounts, array $rHostHealth, int $rNow): array {
 		$rOut = [];
@@ -102,8 +109,13 @@ final class SourceFinder {
 				continue;
 			}
 			$rHave = [];
-			foreach ($rStream['sources'] as $rSource) {
+			$rLogins = [];
+			foreach ($rStream['sources'] as $i => $rSource) {
 				$rHave[self::identity($rSource)] = true;
+				$rLogin = self::login($rSource);
+				if ($rLogin !== null) {
+					$rLogins[$rLogin][] = ['index' => $i, 'key' => (string) SourceProber::accountKey($rSource)];
+				}
 			}
 			$rList = [];
 			foreach ($rFound as $c) {
@@ -129,17 +141,52 @@ final class SourceFinder {
 					'provider' => $p['id'], 'provider_name' => $p['name'], 'channel' => $c['channel'], 'name' => $c['name'], 'url' => $rUrl,
 					'max' => $rMax, 'active' => $rActive, 'spare' => $rSpare, 'health' => $rHostHealth[$p['host']] ?? null,
 					'note' => (($rAudit[md5($rUrl)]['status'] ?? '') === 'ok') ? 'checked ok' : '',
+					'same' => self::sameAs($rLogins[(string) self::login($rUrl)] ?? [], (string) $rKey),
+					'login' => (string) self::login($rUrl),
 				];
 			}
 			if ($rList === []) {
 				continue;
 			}
 			$rList = array_values($rList);
-			usort($rList, static fn (array $a, array $b): int => [($a['spare'] ?? 1) <= 0 ? 1 : 0, -($a['health'] ?? 0.5), -($a['spare'] ?? 0)]
-				<=> [($b['spare'] ?? 1) <= 0 ? 1 : 0, -($b['health'] ?? 0.5), -($b['spare'] ?? 0)]);
-			$rOut[$rStream['id']] = array_slice($rList, 0, self::PER_STREAM);
+			usort($rList, static fn (array $a, array $b): int => [$a['same'] !== '' ? 1 : 0, ($a['spare'] ?? 1) <= 0 ? 1 : 0, -($a['health'] ?? 0.5), -($a['spare'] ?? 0)]
+				<=> [$b['same'] !== '' ? 1 : 0, ($b['spare'] ?? 1) <= 0 ? 1 : 0, -($b['health'] ?? 0.5), -($b['spare'] ?? 0)]);
+			$rKept = [];
+			$rSeen = [];
+			foreach ($rList as $c) {
+				$rDup = $c['login'] !== '' ? $c['login'] . '#' . $c['channel'] : '';
+				if ($rDup !== '' && isset($rSeen[$rDup])) {
+					continue;   // the same channel of the same login on another domain
+				}
+				$rSeen[$rDup] = true;
+				unset($c['login']);
+				$rKept[] = $c;
+			}
+			$rOut[$rStream['id']] = array_slice($rKept, 0, self::PER_STREAM);
 		}
 		return $rOut;
+	}
+
+	/** The login of an Xtream-style URL (user and password), whatever host serves it. */
+	public static function login(string $rSource): ?string {
+		$rAcct = ProviderAccount::parse($rSource);
+		return $rAcct === null ? null : mb_strtolower($rAcct['user']) . "\0" . $rAcct['pass'];
+	}
+
+	/**
+	 * How a candidate shares an account with the stream's sources, for the page.
+	 *
+	 * @param list<array{index:int, key:string}> $rSources the stream's sources with the candidate's login
+	 */
+	private static function sameAs(array $rSources, string $rKey): string {
+		if ($rSources === []) {
+			return '';
+		}
+		$rSameHost = array_values(array_filter($rSources, static fn (array $x): bool => $x['key'] === $rKey));
+		$rNumbers = implode(', ', array_map(static fn (array $x): string => '#' . ($x['index'] + 1), $rSameHost !== [] ? $rSameHost : $rSources));
+		return $rSameHost !== []
+			? 'same account as source ' . $rNumbers . ' (another channel id): shares its connection limit'
+			: 'same account as source ' . $rNumbers . ' on another domain or port: shares its connection limit and falls with it';
 	}
 
 	/** One channel of one account, however its URL is written: account key and channel id. */
