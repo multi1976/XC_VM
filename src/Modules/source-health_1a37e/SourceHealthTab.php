@@ -51,7 +51,7 @@ final class SourceHealthTab {
 		}
 
 		$rFind = '<a href="./source_audit?view=find&amp;level=all&amp;q=' . rawurlencode(SourceHealthRepository::raw((string) ($rStream['stream_display_name'] ?? ''))) . '" target="_blank" rel="noopener">Find other sources for this stream ↗</a>';
-		$rOpen = '<p class="mb-2">' . ($rFullPage ? '' : '<a href="./source_health?id=' . (int) $rStream['id'] . '" target="_blank" rel="noopener">Open this report as a full page ↗</a> · ') . $rFind . '</p>';
+		$rOpen = self::autoRankNote((int) $rStream['id'], $rSources) . '<p class="mb-2">' . ($rFullPage ? '' : '<a href="./source_health?id=' . (int) $rStream['id'] . '" target="_blank" rel="noopener">Open this report as a full page ↗</a> · ') . $rFind . '</p>';
 		return $rOpen . self::probeSwitch((int) $rStream['id'], $rProbing) . self::table($rRows, $rRecent, $rProfiles, $rFrom, $rNow, $rAccounts, $rAccountInfo) . self::timeline($rRows, $rFrom, $rNow) . self::runSection($rRows) . self::errorSection($rRows, $rErrors);
 	}
 
@@ -244,8 +244,36 @@ final class SourceHealthTab {
 		return $rHtml . '</tbody></table></div>';
 	}
 
+	/** What Auto-rank (shadow) makes of this stream: its latest record, or a proposal waiting for confirmation. */
+	private static function autoRankNote(int $rStreamID, array $rSources): string {
+		try {
+			$r = AutoRank::forStream($rStreamID, time());
+		} catch (\Throwable) {
+			return '';
+		}
+		$rIndex = static function (string $rHash) use ($rSources): string {
+			foreach ($rSources as $i => $rSource) {
+				if (md5(trim((string) $rSource)) === $rHash) {
+					return '#' . ($i + 1);
+				}
+			}
+			return 'a source no longer in the stream';
+		};
+		$rLink = ' <a href="./source_audit?view=rank" target="_blank" rel="noopener">Auto-rank ↗</a>';
+		if ($r['decision'] !== null) {
+			$d = $r['decision'];
+			return '<div class="alert alert-secondary small py-2 mb-2"><strong>Auto-rank (shadow, nothing changed):</strong> on ' . htmlspecialchars(date('Y-m-d H:i', (int) $d['decided_at']), ENT_QUOTES)
+				. ' it would have put ' . $rIndex((string) $d['new_hash']) . ' first instead of ' . $rIndex((string) $d['old_hash']) . ': ' . htmlspecialchars((string) $d['reason'], ENT_QUOTES) . '.' . $rLink . '</div>';
+		}
+		if ($r['state'] !== null && (int) $r['state']['pending_count'] > 0) {
+			return '<div class="alert alert-secondary small py-2 mb-2"><strong>Auto-rank (shadow):</strong> leaning towards ' . $rIndex((string) $r['state']['pending_hash'])
+				. ' first; ' . (int) $r['state']['pending_count'] . ' of ' . AutoRank::CONFIRM . ' evaluations so far.' . $rLink . '</div>';
+		}
+		return '';
+	}
+
 	/** Seven days, or less when the panel keeps stream logs for less. */
-	private static function window(): int {
+	public static function window(): int {
 		$rKeep = (int) SettingsManager::get('keep_restarts', 0);
 		return $rKeep > 0 ? min(self::WINDOW_SEC, $rKeep) : self::WINDOW_SEC;
 	}

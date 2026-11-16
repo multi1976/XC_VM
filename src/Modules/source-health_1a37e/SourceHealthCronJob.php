@@ -43,6 +43,8 @@ class SourceHealthCronJob implements CommandInterface {
 		// Source Audit: a light check of every source of every live stream, a few at a time.
 		SourceAudit::run(time());
 		SourceActions::prune(time());
+		// Auto-rank in shadow mode: records which source it would put first, changes nothing.
+		AutoRank::run(time());
 		return 0;
 	}
 }

@@ -147,7 +147,7 @@ final class SourceHealthRepository {
 	public static function deleteForStreams(array $rStreamIDs): void {
 		$rIDs = array_values(array_unique(array_filter(array_map('intval', $rStreamIDs), static fn (int $id): bool => $id > 0)));
 		foreach (array_chunk($rIDs, 500) as $rChunk) {
-			foreach (['source_health_profiles', 'source_health_probes', 'source_health_probe_streams', 'source_health_hosts'] as $rTable) {
+			foreach (['source_health_profiles', 'source_health_probes', 'source_health_probe_streams', 'source_health_hosts', 'source_health_rank_state', 'source_health_rank_decisions'] as $rTable) {
 				self::db()->query('DELETE FROM `' . $rTable . '` WHERE `stream_id` IN (' . implode(',', $rChunk) . ')');
 			}
 		}

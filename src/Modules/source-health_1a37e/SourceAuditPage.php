@@ -21,10 +21,11 @@ final class SourceAuditPage {
 	/** @param array<string, mixed> $rQuery the page's GET parameters (status, host) */
 	public static function render(array $rQuery, int $rNow): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
-		$rView = in_array($rQuery['view'] ?? '', ['streams', 'find', 'accounts', 'changes'], true) ? (string) $rQuery['view'] : 'sources';
+		$rView = in_array($rQuery['view'] ?? '', ['streams', 'find', 'rank', 'accounts', 'changes'], true) ? (string) $rQuery['view'] : 'sources';
 		$rTabs = '<ul class="nav nav-tabs mb-3"><li class="nav-item"><a class="nav-link' . ($rView === 'sources' ? ' active' : '') . '" href="./source_audit">Sources</a></li>'
 			. '<li class="nav-item"><a class="nav-link' . ($rView === 'streams' ? ' active' : '') . '" href="./source_audit?view=streams">Streams</a></li>'
 			. '<li class="nav-item"><a class="nav-link' . ($rView === 'find' ? ' active' : '') . '" href="./source_audit?view=find">Find sources</a></li>'
+			. '<li class="nav-item"><a class="nav-link' . ($rView === 'rank' ? ' active' : '') . '" href="./source_audit?view=rank">Auto-rank <span class="badge bg-label-secondary">shadow</span></a></li>'
 			. '<li class="nav-item"><a class="nav-link' . ($rView === 'accounts' ? ' active' : '') . '" href="./source_audit?view=accounts">Provider accounts</a></li>'
 			. '<li class="nav-item"><a class="nav-link' . ($rView === 'changes' ? ' active' : '') . '" href="./source_audit?view=changes">Changes &amp; undo</a></li></ul>';
 		if ($rView === 'accounts') {
@@ -75,6 +76,9 @@ final class SourceAuditPage {
 
 		if ($rView === 'streams') {
 			return $rTabs . self::streams($rRows, $rQuery) . self::actionScript();
+		}
+		if ($rView === 'rank') {
+			return $rTabs . self::autoRank($rNow);
 		}
 		if ($rView === 'find') {
 			return $rTabs . self::find($rRows, $rQuery, $rState, $rAccounts, $rNow);
@@ -372,6 +376,82 @@ JS;
 			$rHtml .= '<p class="text-muted small">Showing the first ' . self::MAX_ROWS . ' of ' . count($rShown) . '.</p>';
 		}
 		return $rHtml;
+	}
+
+	/** Verdict => [label, badge class, what it means]. */
+	private const RANK_VERDICTS = [
+		'helped'      => ['would have helped', 'bg-label-success', 'the first source failed in the day after, the proposed one did not and was seen working'],
+		'hurt'        => ['would have hurt', 'bg-label-danger', 'the proposed source failed in the day after, the first one did not'],
+		'both_failed' => ['both failed', 'bg-label-warning', 'both sources failed in the day after'],
+		'same'        => ['no difference', 'bg-label-secondary', 'neither failed in the day after'],
+		'unknown'     => ['not enough seen', 'bg-label-secondary', 'the first source failed, but too little was seen of the proposed one (no probe, no time on air) to tell'],
+		'gone'        => ['source gone', 'bg-label-secondary', 'one of the two sources is no longer in the stream'],
+	];
+
+	/** The Auto-rank view: what shadow mode would have changed, and how it turned out. */
+	private static function autoRank(int $rNow): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rFrom = $rNow - 7 * 86400;
+		$rRows = AutoRank::decisions($rFrom);
+		$rCov = AutoRank::coverage($rNow);
+		$rHtml = '<div class="alert alert-secondary small mb-3"><strong>Shadow mode: nothing is changed.</strong> Every stream with two sources or more is evaluated about every '
+			. intdiv(AutoRank::EVAL_EVERY_SEC, 60) . ' minutes with its Source Health scores. A change is recorded when a source further down is clearly better than the first: '
+			. 'it has enough data (medium confidence or better, an hour on air or ' . AutoRank::MIN_PROBES_OK . ' good probes), Source Audit does not find it dead or down, and either the first source is dead or down by Source Audit or the other one ranks '
+			. (int) AutoRank::MARGIN . ' points higher. The same proposal must come out ' . AutoRank::CONFIRM . ' evaluations in a row, a stream gets at most one record every '
+			. intdiv(AutoRank::MIN_INTERVAL_SEC, 3600) . ' h, and a proposal still standing is not recorded twice. Once switched on, a new order would only take effect at the stream\'s next failover or restart, never by cutting the source on air. '
+			. 'A day after each record, the day is read again: how the first source did, and what was seen of the proposed one.</div>';
+		$rHtml .= '<p class="small mb-2">Evaluated in the last hour: <strong>' . $rCov['evaluated'] . '</strong> stream(s) of ' . $rCov['streams'] . ' known; proposals waiting for confirmation: <strong>' . $rCov['pending'] . '</strong>.</p>';
+
+		$rCount = array_fill_keys(array_keys(self::RANK_VERDICTS), 0);
+		$rOpen = 0;
+		foreach ($rRows as $r) {
+			if ($r['verdict'] === null) {
+				$rOpen++;
+			} elseif (isset($rCount[$r['verdict']])) {
+				$rCount[$r['verdict']]++;
+			}
+		}
+		$rHtml .= '<div class="d-flex flex-wrap gap-2 mb-3"><span class="badge bg-label-primary p-2">Recorded, last 7 days: ' . count($rRows) . '</span>'
+			. '<span class="badge bg-label-info p-2" title="less than a day old">Waiting a day: ' . $rOpen . '</span>';
+		foreach (self::RANK_VERDICTS as $rKey => [$rLabel, $rBadge, $rWhat]) {
+			$rHtml .= '<span class="badge ' . $rBadge . ' p-2" title="' . $h($rWhat) . '">' . $h(ucfirst($rLabel)) . ': ' . $rCount[$rKey] . '</span>';
+		}
+		$rHtml .= '</div>';
+		if ($rRows === []) {
+			return $rHtml . '<p class="text-muted mb-0">Nothing recorded yet. The first records come after two evaluations of a stream, about an hour after the module starts evaluating.</p>';
+		}
+		$rHtml .= '<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>When</th><th>Stream</th><th>Would put first</th><th>Why</th>'
+			. '<th class="text-center" title="Source Health score of the first source / the proposed one">Scores</th><th title="how the two did in the day after">The day after</th><th>Verdict</th></tr></thead><tbody>';
+		foreach (array_slice($rRows, 0, self::MAX_ROWS) as $r) {
+			$rSources = array_values(array_filter(array_map(static fn ($v): string => is_string($v) ? trim($v) : '', (array) json_decode(SourceHealthRepository::raw((string) ($r['sources'] ?? '')), true))));
+			$rLabel = static function (string $rHash, int $rIndex) use ($rSources, $h): string {
+				foreach ($rSources as $i => $rSource) {
+					if (md5($rSource) === $rHash) {
+						return '<strong>#' . ($i + 1) . '</strong> <code class="small">' . $h(SourceHealthTab::mask($rSource)) . '</code>';
+					}
+				}
+				return '<strong>#' . ($rIndex + 1) . '</strong> <span class="text-muted small">(no longer in the stream)</span>';
+			};
+			if ($r['outcome_at'] === null) {
+				$rAfter = '<span class="text-muted small">read in ' . SourceHealthTab::duration(max(60, (int) $r['decided_at'] + AutoRank::OUTCOME_SEC - $rNow)) . '</span>';
+				$rVerdict = '<span class="badge bg-label-info">waiting</span>';
+			} else {
+				$rAfter = '<small>first: ' . (int) $r['old_incidents'] . ' incident(s)' . ((int) $r['old_start_fails'] > 0 ? ', ' . (int) $r['old_start_fails'] . ' failed start(s)' : '')
+					. ((int) $r['old_uptime'] > 0 ? ', ' . SourceHealthTab::duration((int) $r['old_uptime']) . ' on air' : '') . '<br>'
+					. 'proposed: ' . ((int) $r['new_probe_total'] > 0 ? (int) $r['new_probe_ok'] . '/' . (int) $r['new_probe_total'] . ' probes ok' : 'no probe')
+					. ((int) $r['new_uptime'] > 0 ? ', ' . SourceHealthTab::duration((int) $r['new_uptime']) . ' on air, ' . (int) $r['new_incidents'] . ' incident(s)' : '') . '</small>';
+				[$rL, $rB, $rW] = self::RANK_VERDICTS[$r['verdict']] ?? [$r['verdict'], 'bg-label-secondary', ''];
+				$rVerdict = '<span class="badge ' . $rB . '" title="' . $h($rW) . '">' . $h($rL) . '</span>';
+			}
+			$rHtml .= '<tr><td><small>' . $h(date('Y-m-d H:i', (int) $r['decided_at'])) . '</small></td>'
+				. '<td><a href="./source_health?id=' . (int) $r['stream_id'] . '" target="_blank" rel="noopener">' . $h(SourceHealthRepository::raw((string) ($r['name'] ?? '#' . $r['stream_id']))) . '</a></td>'
+				. '<td><small>' . $rLabel((string) $r['new_hash'], (int) $r['new_index']) . '<br><span class="text-muted">instead of</span> ' . $rLabel((string) $r['old_hash'], (int) $r['old_index'])
+				. ((int) $r['on_air'] === 1 ? ' <span class="badge bg-label-success" title="the first source was on air when this was recorded">on air</span>' : '') . '</small></td>'
+				. '<td><small>' . $h($r['reason']) . '</small></td>'
+				. '<td class="text-center"><small>' . ($r['old_score'] === null ? '–' : (int) $r['old_score']) . ' → <strong>' . ($r['new_score'] === null ? '–' : (int) $r['new_score']) . '</strong></small></td>'
+				. '<td>' . $rAfter . '</td><td>' . $rVerdict . '</td></tr>';
+		}
+		return $rHtml . '</tbody></table></div>' . (count($rRows) > self::MAX_ROWS ? '<p class="text-muted small">The first ' . self::MAX_ROWS . ' of ' . count($rRows) . '.</p>' : '');
 	}
 
 	/**
