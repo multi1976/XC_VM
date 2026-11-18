@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS `source_health_rank_decisions` (
   `old_start_fails` int(11) DEFAULT NULL,
   `new_incidents` int(11) DEFAULT NULL,
   `new_uptime` int(11) DEFAULT NULL,
+  `new_start_fails` int(11) DEFAULT NULL,
   `new_probe_ok` int(11) DEFAULT NULL,
   `new_probe_total` int(11) DEFAULT NULL,
   `verdict` varchar(16) DEFAULT NULL,

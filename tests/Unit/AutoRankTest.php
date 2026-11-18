@@ -69,12 +69,22 @@ final class AutoRankTest extends TestCase {
 		$r5 = AutoRank::decide($rFirstOff, $rAudit, AutoRank::decide($rFirstOff, $rAudit, null, $t)['state'], $t + 1800);
 		$this->assertSame('the first source is dead by Source Audit', $r5['decision']['reason']);
 
-		$this->assertSame('helped', AutoRank::verdict(2, 0, 0, 0, 3, 3));
-		$this->assertSame('hurt', AutoRank::verdict(0, 0, 1, 600, 0, 0));
-		$this->assertSame('hurt', AutoRank::verdict(0, 0, 0, 0, 1, 4));                                  // most probes failed
-		$this->assertSame('both_failed', AutoRank::verdict(1, 0, 1, 300, 0, 0));
-		$this->assertSame('same', AutoRank::verdict(0, 0, 0, 0, 2, 2));
-		$this->assertSame('unknown', AutoRank::verdict(3, 1, 0, 0, 0, 0));
+		// Never a weak or a worse source first, not even in place of one that is off: the records of the first week.
+		$this->assertSame('score under 30', AutoRank::ineligible(self::row(1, self::B, 6, 'high'), []));
+		$rWorse = [self::row(0, self::A, 70, 'high'), self::row(1, self::B, 40, 'high')];
+		$this->assertSame(0, AutoRank::decide($rWorse, $rAudit, null, $t)['state']['pending_count']);
+
+		$o = static fn (int $i, int $f, int $up): array => ['incidents' => $i, 'start_fails' => $f, 'uptime' => $up];
+		$n = static fn (int $i, int $f, int $up, int $ok = 0, int $tot = 0): array => ['incidents' => $i, 'start_fails' => $f, 'uptime' => $up, 'probe_ok' => $ok, 'probe_total' => $tot];
+		$this->assertSame('helped', AutoRank::verdict($o(0, 18, 0), $n(1, 0, 7260, 33, 37)));             // Ferma Vip 2: one drop in two hours on air
+		$this->assertSame('helped', AutoRank::verdict($o(2, 0, 3600), $n(0, 0, 0, 3, 3)));
+		$this->assertSame('hurt', AutoRank::verdict($o(11, 17, 60240), $n(9, 0, 7560)));                // Super Sport 1: 4 an hour against 1.7
+		$this->assertSame('hurt', AutoRank::verdict($o(0, 0, 3600), $n(1, 0, 600)));
+		$this->assertSame('hurt', AutoRank::verdict($o(0, 0, 0), $n(0, 0, 0, 1, 4)));                   // most probes failed
+		$this->assertSame('both_failed', AutoRank::verdict($o(0, 25, 0), $n(6, 0, 420)));                // Milan Channel: six drops in seven minutes
+		$this->assertSame('same', AutoRank::verdict($o(0, 0, 3600), $n(0, 0, 0, 2, 2)));
+		$this->assertSame('idle', AutoRank::verdict($o(0, 0, 0), $n(0, 0, 0)));                          // nobody watched it that day
+		$this->assertSame('unknown', AutoRank::verdict($o(3, 1, 0), $n(0, 0, 0)));
 	}
 
 	public function testRunRecordsWithoutTouchingTheStreamAndReadsTheDayAfter(): void {
@@ -108,10 +118,11 @@ final class AutoRankTest extends TestCase {
 			$this->assertStringNotContainsString('/live/u/p/', $rPage);                                     // masked, no account
 			$this->assertStringContainsString('it would have put #2 first instead of #1', SourceHealthTab::render(['id' => 1, 'stream_source' => json_encode([self::A, self::B]), 'stream_display_name' => 'Tring Sport 2'], 'edit'));
 
-			// A day later: nothing failed and nothing more was seen of B, so no difference.
+			// A day later: the stream was not used that day, nothing to compare.
 			$rLater = $rNow + AutoRank::EVAL_EVERY_SEC + AutoRank::OUTCOME_SEC + 60;
 			$this->assertSame(1, AutoRank::run($rLater)['outcomes']);
-			$this->assertSame('same', $rDb->fetchValue('SELECT `verdict` FROM `source_health_rank_decisions` WHERE `stream_id` = 1'));
+			$this->assertSame('idle', $rDb->fetchValue('SELECT `verdict` FROM `source_health_rank_decisions` WHERE `stream_id` = 1'));
+			$this->assertStringContainsString('not used', SourceAuditPage::render(['view' => 'rank'], $rLater));
 
 			$rDb->query('DELETE FROM `streams` WHERE `id` = 1');
 			AutoRank::run($rLater + 60);

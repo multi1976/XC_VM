@@ -380,10 +380,11 @@ JS;
 
 	/** Verdict => [label, badge class, what it means]. */
 	private const RANK_VERDICTS = [
-		'helped'      => ['would have helped', 'bg-label-success', 'the first source failed in the day after, the proposed one did not and was seen working'],
-		'hurt'        => ['would have hurt', 'bg-label-danger', 'the proposed source failed in the day after, the first one did not'],
-		'both_failed' => ['both failed', 'bg-label-warning', 'both sources failed in the day after'],
+		'helped'      => ['would have helped', 'bg-label-success', 'the first source failed in the day after, the proposed one was seen working (at most one failure an hour on air, most probes passed)'],
+		'hurt'        => ['would have hurt', 'bg-label-danger', 'the proposed source failed in the day after while the first did not, or failed at over twice its rate'],
+		'both_failed' => ['both failed', 'bg-label-warning', 'both sources failed in the day after: a better order would not have saved the stream, it needs another source (Find sources)'],
 		'same'        => ['no difference', 'bg-label-secondary', 'neither failed in the day after'],
+		'idle'        => ['not used', 'bg-label-secondary', 'the stream was not started that day: nothing to compare'],
 		'unknown'     => ['not enough seen', 'bg-label-secondary', 'the first source failed, but too little was seen of the proposed one (no probe, no time on air) to tell'],
 		'gone'        => ['source gone', 'bg-label-secondary', 'one of the two sources is no longer in the stream'],
 	];
@@ -396,7 +397,7 @@ JS;
 		$rCov = AutoRank::coverage($rNow);
 		$rHtml = '<div class="alert alert-secondary small mb-3"><strong>Shadow mode: nothing is changed.</strong> Every stream with two sources or more is evaluated about every '
 			. intdiv(AutoRank::EVAL_EVERY_SEC, 60) . ' minutes with its Source Health scores. A change is recorded when a source further down is clearly better than the first: '
-			. 'it has enough data (medium confidence or better, an hour on air or ' . AutoRank::MIN_PROBES_OK . ' good probes), Source Audit does not find it dead or down, and either the first source is dead or down by Source Audit or the other one ranks '
+			. 'it has enough data (medium confidence or better, an hour on air or ' . AutoRank::MIN_PROBES_OK . ' good probes), a score of ' . AutoRank::MIN_SCORE . ' or more, ranks above the first, Source Audit does not find it dead or down, and either the first source is dead or down by Source Audit or the other one ranks '
 			. (int) AutoRank::MARGIN . ' points higher. The same proposal must come out ' . AutoRank::CONFIRM . ' evaluations in a row, a stream gets at most one record every '
 			. intdiv(AutoRank::MIN_INTERVAL_SEC, 3600) . ' h, and a proposal still standing is not recorded twice. Once switched on, a new order would only take effect at the stream\'s next failover or restart, never by cutting the source on air. '
 			. 'A day after each record, the day is read again: how the first source did, and what was seen of the proposed one.</div>';
@@ -404,13 +405,15 @@ JS;
 
 		$rCount = array_fill_keys(array_keys(self::RANK_VERDICTS), 0);
 		$rOpen = 0;
-		foreach ($rRows as $r) {
+		foreach ($rRows as &$r) {
+			$r['verdict'] = AutoRank::verdictOf($r);
 			if ($r['verdict'] === null) {
 				$rOpen++;
 			} elseif (isset($rCount[$r['verdict']])) {
 				$rCount[$r['verdict']]++;
 			}
 		}
+		unset($r);
 		$rHtml .= '<div class="d-flex flex-wrap gap-2 mb-3"><span class="badge bg-label-primary p-2">Recorded, last 7 days: ' . count($rRows) . '</span>'
 			. '<span class="badge bg-label-info p-2" title="less than a day old">Waiting a day: ' . $rOpen . '</span>';
 		foreach (self::RANK_VERDICTS as $rKey => [$rLabel, $rBadge, $rWhat]) {
@@ -439,7 +442,8 @@ JS;
 				$rAfter = '<small>first: ' . (int) $r['old_incidents'] . ' incident(s)' . ((int) $r['old_start_fails'] > 0 ? ', ' . (int) $r['old_start_fails'] . ' failed start(s)' : '')
 					. ((int) $r['old_uptime'] > 0 ? ', ' . SourceHealthTab::duration((int) $r['old_uptime']) . ' on air' : '') . '<br>'
 					. 'proposed: ' . ((int) $r['new_probe_total'] > 0 ? (int) $r['new_probe_ok'] . '/' . (int) $r['new_probe_total'] . ' probes ok' : 'no probe')
-					. ((int) $r['new_uptime'] > 0 ? ', ' . SourceHealthTab::duration((int) $r['new_uptime']) . ' on air, ' . (int) $r['new_incidents'] . ' incident(s)' : '') . '</small>';
+					. ((int) $r['new_uptime'] > 0 ? ', ' . SourceHealthTab::duration((int) $r['new_uptime']) . ' on air, ' . (int) $r['new_incidents'] . ' incident(s)' : '')
+					. ((int) ($r['new_start_fails'] ?? 0) > 0 ? ', ' . (int) $r['new_start_fails'] . ' failed start(s)' : '') . '</small>';
 				[$rL, $rB, $rW] = self::RANK_VERDICTS[$r['verdict']] ?? [$r['verdict'], 'bg-label-secondary', ''];
 				$rVerdict = '<span class="badge ' . $rB . '" title="' . $h($rW) . '">' . $h($rL) . '</span>';
 			}
@@ -447,7 +451,10 @@ JS;
 				. '<td><a href="./source_health?id=' . (int) $r['stream_id'] . '" target="_blank" rel="noopener">' . $h(SourceHealthRepository::raw((string) ($r['name'] ?? '#' . $r['stream_id']))) . '</a></td>'
 				. '<td><small>' . $rLabel((string) $r['new_hash'], (int) $r['new_index']) . '<br><span class="text-muted">instead of</span> ' . $rLabel((string) $r['old_hash'], (int) $r['old_index'])
 				. ((int) $r['on_air'] === 1 ? ' <span class="badge bg-label-success" title="the first source was on air when this was recorded">on air</span>' : '') . '</small></td>'
-				. '<td><small>' . $h($r['reason']) . '</small></td>'
+				. '<td><small>' . $h($r['reason'])
+				. (($r['new_score'] !== null && (int) $r['new_score'] < AutoRank::MIN_SCORE) || (float) $r['new_value'] <= (float) $r['old_value']
+					? '<br><span class="badge bg-label-secondary" title="recorded under the first rules: a source scoring under ' . AutoRank::MIN_SCORE . ', or ranking below the first, is no longer proposed">not proposed today</span>' : '')
+				. '</small></td>'
 				. '<td class="text-center"><small>' . ($r['old_score'] === null ? '–' : (int) $r['old_score']) . ' → <strong>' . ($r['new_score'] === null ? '–' : (int) $r['new_score']) . '</strong></small></td>'
 				. '<td>' . $rAfter . '</td><td>' . $rVerdict . '</td></tr>';
 		}

@@ -16,10 +16,13 @@ use XcVm\Infrastructure\Database\DatabaseAware;
  * source over the report window. A change is proposed when a source further
  * down is clearly better than the first one:
  *
- *   - it is eligible: a score, at least medium confidence, an hour on air or
- *     MIN_PROBES_OK good probes, and not found dead or down by Source Audit;
- *   - and either the first source is off by Source Audit, or the other one's
- *     rank value (SourceHealthCalculator::rankValue) is MARGIN points ahead.
+ *   - it is eligible: a score of MIN_SCORE or more, at least medium
+ *     confidence, an hour on air or MIN_PROBES_OK good probes, and not found
+ *     dead or down by Source Audit;
+ *   - it ranks above the first (SourceHealthCalculator::rankValue), never
+ *     below, even when the first is off now;
+ *   - and either the first source is off by Source Audit, or the other one
+ *     ranks MARGIN points ahead.
  *
  * Hysteresis, so the order does not flap: the same proposal must come out of
  * CONFIRM evaluations in a row, and a stream gets at most one recorded change
@@ -43,6 +46,12 @@ final class AutoRank {
 	public const MIN_INTERVAL_SEC = 6 * 3600;
 	public const MIN_ON_AIR_SEC = 3600;
 	public const MIN_PROBES_OK = 3;
+	/** A source scoring under this is never put first, not even in place of a dead one: it would only trade one failure for another. */
+	public const MIN_SCORE = 30;
+	/** Failures (incidents and failed starts) per hour on air a source may have in the day after and still count as working. */
+	public const GOOD_RATE = 1.0;
+	/** Time on air a rate is computed over, at least: six failures in seven minutes are not 51 an hour, but neither are they fine. */
+	public const RATE_FLOOR_SEC = 900;
 	public const OUTCOME_SEC = 86400;
 	public const KEEP_SEC = 30 * 86400;
 
@@ -98,6 +107,7 @@ final class AutoRank {
 		return match (true) {
 			$rRow['score'] === null                                  => 'nothing measured',
 			in_array($rRow['confidence'], ['none', 'low'], true)      => 'too little data',
+			(int) $rRow['score'] < self::MIN_SCORE                   => 'score under ' . self::MIN_SCORE,
 			(int) $rRow['uptime_sec'] < self::MIN_ON_AIR_SEC && (int) ($rRow['probe_ok'] ?? 0) < self::MIN_PROBES_OK => 'not an hour on air nor ' . self::MIN_PROBES_OK . ' good probes',
 			in_array($rStatus, ['dead', 'down'], true)               => 'Source Audit found it ' . $rStatus,
 			default                                                  => null,
@@ -142,6 +152,12 @@ final class AutoRank {
 			return ['state' => $rClear($rState), 'decision' => null];
 		}
 		$rBestValue = SourceHealthCalculator::rankValue($rBest);
+		if ($rBestValue <= $rFirstValue) {
+			// Never a worse source first, even in place of one that is off now:
+			// a first source off by the audit that still ranks higher has worked
+			// better over the week than the one that would replace it.
+			return ['state' => $rClear($rState), 'decision' => null];
+		}
 		if ($rFirstOff) {
 			$rReason = 'the first source is ' . $rAudit[$rFirstHash]['status'] . ' by Source Audit';
 		} elseif ($rBestValue - $rFirstValue >= self::MARGIN) {
@@ -176,24 +192,56 @@ final class AutoRank {
 	}
 
 	/**
-	 * What a record turned out to be. PURE.
+	 * What a record turned out to be, from the day after it. PURE.
 	 *
-	 * helped: the first source failed after the record, the proposed one did
-	 * not and was seen working (a probe, time on air). hurt: the proposed one
-	 * failed and the first did not. same: neither failed. unknown: too little
-	 * seen of the proposed one to tell.
+	 * A source works when its failures (incidents and failed starts) per hour
+	 * on air stay within GOOD_RATE, over at least RATE_FLOOR_SEC, and most of its
+	 * probes passed. The first source failed when it had any failure.
+	 *   idle         the stream was not used that day: nothing to compare;
+	 *   helped       the first failed, the proposed one was seen working;
+	 *   hurt         the proposed one failed, and the first did not, or the
+	 *                proposed one failed at over twice the first one's rate;
+	 *   both_failed  both failed;
+	 *   same         neither failed;
+	 *   unknown      the first failed, the proposed one was not seen at all.
+	 *
+	 * @param array{incidents:?int, start_fails:?int, uptime:?int} $rOld
+	 * @param array{incidents:?int, start_fails:?int, uptime:?int, probe_ok:?int, probe_total:?int} $rNew
 	 */
-	public static function verdict(int $rOldIncidents, int $rOldStartFails, int $rNewIncidents, int $rNewUptime, int $rNewProbeOk, int $rNewProbeTotal): string {
-		$rOldBad = $rOldIncidents + $rOldStartFails > 0;
-		$rNewSeen = $rNewUptime > 0 || $rNewProbeTotal > 0;
-		$rNewBad = $rNewIncidents > 0 || ($rNewProbeTotal > 0 && $rNewProbeOk * 2 < $rNewProbeTotal);
+	public static function verdict(array $rOld, array $rNew): string {
+		$rOldFails = (int) ($rOld['incidents'] ?? 0) + (int) ($rOld['start_fails'] ?? 0);
+		$rNewFails = (int) ($rNew['incidents'] ?? 0) + (int) ($rNew['start_fails'] ?? 0);
+		$rOldUp = (int) ($rOld['uptime'] ?? 0);
+		$rNewUp = (int) ($rNew['uptime'] ?? 0);
+		$rProbes = (int) ($rNew['probe_total'] ?? 0);
+		if ($rOldFails === 0 && $rOldUp === 0 && $rNewUp === 0 && $rNewFails === 0) {
+			return $rProbes > 0 && (int) $rNew['probe_ok'] * 2 < $rProbes ? 'hurt' : 'idle';
+		}
+		$rRate = static fn (int $rFails, int $rUp): float => $rFails / (max($rUp, self::RATE_FLOOR_SEC) / 3600);
+		$rNewSeen = $rNewUp > 0 || $rNewFails > 0 || $rProbes > 0;
+		$rNewWorks = $rRate($rNewFails, $rNewUp) <= self::GOOD_RATE && ($rProbes === 0 || (int) $rNew['probe_ok'] * 2 >= $rProbes);
+		$rOldBad = $rOldFails > 0;
 		return match (true) {
-			!$rNewSeen                => $rOldBad ? 'unknown' : 'same',
-			$rOldBad && !$rNewBad     => 'helped',
-			$rNewBad && !$rOldBad     => 'hurt',
-			$rOldBad && $rNewBad      => 'both_failed',
-			default                   => 'same',
+			!$rNewSeen                                                             => $rOldBad ? 'unknown' : 'same',
+			$rOldBad && $rNewWorks                                                 => 'helped',
+			!$rNewWorks && (!$rOldBad || $rRate($rNewFails, $rNewUp) > 2 * $rRate($rOldFails, $rOldUp)) => 'hurt',
+			$rOldBad                                                               => 'both_failed',
+			default                                                                => 'same',
 		};
+	}
+
+	/** The verdict of a stored record, from its numbers (so the rules can change and old records follow). */
+	public static function verdictOf(array $r): ?string {
+		if ($r['outcome_at'] === null) {
+			return null;
+		}
+		if ($r['verdict'] === 'gone') {
+			return 'gone';
+		}
+		return self::verdict(
+			['incidents' => $r['old_incidents'], 'start_fails' => $r['old_start_fails'], 'uptime' => $r['old_uptime']],
+			['incidents' => $r['new_incidents'], 'start_fails' => $r['new_start_fails'] ?? 0, 'uptime' => $r['new_uptime'], 'probe_ok' => $r['new_probe_ok'], 'probe_total' => $r['new_probe_total']]
+		);
 	}
 
 	/** Records whose day has passed: read the day since and keep the verdict. */
@@ -214,10 +262,13 @@ final class AutoRank {
 			}
 			$rOld = $rByHash[$d['old_hash']] ?? null;
 			$rNew = $rByHash[$d['new_hash']] ?? null;
-			$rV = ($rOld === null || $rNew === null) ? 'gone' : self::verdict((int) $rOld['incidents'], (int) $rOld['start_fails'], (int) $rNew['incidents'], (int) $rNew['uptime_sec'], (int) ($rNew['probe_ok'] ?? 0), (int) ($rNew['probe_total'] ?? 0));
+			$rV = ($rOld === null || $rNew === null) ? 'gone' : self::verdict(
+				['incidents' => (int) $rOld['incidents'], 'start_fails' => (int) $rOld['start_fails'], 'uptime' => (int) $rOld['uptime_sec']],
+				['incidents' => (int) $rNew['incidents'], 'start_fails' => (int) $rNew['start_fails'], 'uptime' => (int) $rNew['uptime_sec'], 'probe_ok' => (int) ($rNew['probe_ok'] ?? 0), 'probe_total' => (int) ($rNew['probe_total'] ?? 0)]
+			);
 			self::db()->query(
-				'UPDATE `source_health_rank_decisions` SET `outcome_at` = ?, `old_incidents` = ?, `old_uptime` = ?, `old_start_fails` = ?, `new_incidents` = ?, `new_uptime` = ?, `new_probe_ok` = ?, `new_probe_total` = ?, `verdict` = ? WHERE `id` = ?',
-				$rNow, $rOld['incidents'] ?? null, $rOld['uptime_sec'] ?? null, $rOld['start_fails'] ?? null, $rNew['incidents'] ?? null, $rNew['uptime_sec'] ?? null, $rNew['probe_ok'] ?? null, $rNew['probe_total'] ?? null, $rV, (int) $d['id']
+				'UPDATE `source_health_rank_decisions` SET `outcome_at` = ?, `old_incidents` = ?, `old_uptime` = ?, `old_start_fails` = ?, `new_incidents` = ?, `new_uptime` = ?, `new_start_fails` = ?, `new_probe_ok` = ?, `new_probe_total` = ?, `verdict` = ? WHERE `id` = ?',
+				$rNow, $rOld['incidents'] ?? null, $rOld['uptime_sec'] ?? null, $rOld['start_fails'] ?? null, $rNew['incidents'] ?? null, $rNew['uptime_sec'] ?? null, $rNew['start_fails'] ?? null, $rNew['probe_ok'] ?? null, $rNew['probe_total'] ?? null, $rV, (int) $d['id']
 			);
 			$rDone++;
 		}
