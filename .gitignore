@@ -21,6 +21,7 @@ src/tmp/**
 # Modules are installed per panel and ship from their own repositories; keep
 # only the directory placeholder so a locally installed module never gets committed.
 src/Modules/*
+!src/Modules/usage-audit_ae9e0/
 !src/Modules/.gitkeep
 src/bin/xc_fanout/disabled
 

@@ -1,0 +1,14 @@
+{
+    "name": "usage-audit",
+    "title": "Usage Audit",
+    "hash_id": "ae9e020998d23ef330bfd8c4a553c857",
+    "description": "What is watched and what is not: viewer-hours and peak viewers per channel, movie, series and category, the busy hours of the day, and the channels nobody watches. Read-only.",
+    "version": "0.1.0",
+    "requires_core": "",
+    "environment": "main",
+    "priority": 0,
+    "dependencies": [],
+    "optional_dependencies": [],
+    "has_navbar": true,
+    "has_settings": false
+}
