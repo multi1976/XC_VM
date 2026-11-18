@@ -136,6 +136,14 @@ final class UsageAuditAnalyzer {
 		return $rSecs >= 60 ? intdiv($rSecs, 60) . 'm' : $rSecs . 's';
 	}
 
+	/**
+	 * A category separator: a stream named "=Name=" (or "=== Name ===") that
+	 * only heads a group of channels in players without categories.
+	 */
+	public static function isSeparator(string $rName): bool {
+		return (bool) preg_match('/^\s*=.*=\s*$/su', $rName) && mb_strlen(trim($rName)) >= 2;
+	}
+
 	/** @return list<int> ids from a JSON list column ("[1,2]"), or a plain number */
 	public static function ids(?string $rJson): array {
 		$rList = json_decode((string) $rJson, true);

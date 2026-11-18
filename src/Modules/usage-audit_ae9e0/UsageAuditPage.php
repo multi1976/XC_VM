@@ -13,7 +13,10 @@ final class UsageAuditPage {
 	private const TABS = ['overview' => 'Overview', 'live' => 'Channels', 'movies' => 'Movies', 'series' => 'Series', 'categories' => 'Categories', 'never' => 'Not watched'];
 	private const KINDS = ['live' => 'Channels and radio', 'movies' => 'Movies', 'series' => 'Series'];
 
-	/** @param array<string, mixed> $rQuery GET parameters: view, days, kind, q */
+	/** Category types each list is filtered by. */
+	private const CATEGORY_TYPES = ['live' => ['live', 'radio'], 'movies' => ['movie'], 'series' => ['series']];
+
+	/** @param array<string, mixed> $rQuery GET parameters: view, days, kind, q, cat (list of category ids) */
 	public static function render(array $rQuery, int $rNow): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rView = isset(self::TABS[$rQuery['view'] ?? '']) ? (string) $rQuery['view'] : 'overview';
@@ -21,26 +24,39 @@ final class UsageAuditPage {
 		$rDays = isset(self::DAYS[$rDays]) ? $rDays : 7;
 		$rKind = isset(self::KINDS[$rQuery['kind'] ?? '']) ? (string) $rQuery['kind'] : 'live';
 		$rSearch = mb_substr(trim((string) ($rQuery['q'] ?? '')), 0, 64);
+		$rCats = array_slice(array_values(array_unique(array_filter(array_map('intval', (array) ($rQuery['cat'] ?? [])), static fn (int $v): bool => $v > 0))), 0, 200);
 		$rFrom = $rNow - $rDays * 86400;
 
+		// Category separators ("=== NEWS ===", a stream that only heads a group in
+		// old players) are no channel: left out of every figure and list.
 		$rStreams = UsageAuditRepository::streams();
+		$rSeparators = array_filter($rStreams, static fn (array $s): bool => UsageAuditAnalyzer::isSeparator($s['name']));
+		$rStreams = array_diff_key($rStreams, $rSeparators);
 		$rSeries = UsageAuditRepository::series();
 		$rGroupOf = [];
 		foreach ($rSeries['episodes'] as $rStreamID => $rSeriesID) {
 			$rGroupOf[$rStreamID] = 's' . $rSeriesID;
 		}
 		$rRead = UsageAuditRepository::sessions($rFrom, $rNow);
+		if ($rSeparators !== []) {
+			$rRead['sessions'] = array_values(array_filter($rRead['sessions'], static fn (array $r): bool => !isset($rSeparators[$r[1]])));
+		}
 		$rRestreamers = UsageAuditRepository::restreamers();
 		$rUsage = UsageAuditAnalyzer::usage($rRead['sessions'], $rFrom, $rNow, $rRestreamers, $rGroupOf);
 		$rCtx = [
 			'streams' => $rStreams, 'series' => $rSeries['series'], 'categories' => UsageAuditRepository::categories(), 'running' => UsageAuditRepository::running(),
-			'bouquets' => UsageAuditRepository::bouquets(), 'from' => $rFrom, 'now' => $rNow, 'days' => $rDays, 'search' => $rSearch, 'kind' => $rKind,
+			'bouquets' => UsageAuditRepository::bouquets(), 'from' => $rFrom, 'now' => $rNow, 'days' => $rDays, 'search' => $rSearch, 'kind' => $rKind, 'cats' => $rCats, 'separators' => count($rSeparators),
 			'coverage' => UsageAuditRepository::coverage(), 'truncated' => $rRead['truncated'], 'restreamers' => count($rRestreamers),
 		];
 		$rLive = self::pick($rUsage['groups'], static fn ($k): bool => is_int($k) && in_array($rStreams[$k]['type'] ?? 0, [...UsageAuditRepository::LIVE_TYPES, UsageAuditRepository::RADIO_TYPE], true));
 		$rMovies = self::pick($rUsage['groups'], static fn ($k): bool => is_int($k) && ($rStreams[$k]['type'] ?? 0) === UsageAuditRepository::MOVIE_TYPE);
 		$rShows = self::pick($rUsage['groups'], static fn ($k): bool => is_string($k) && $k[0] === 's');
 		$rNever = self::notWatched($rUsage['groups'], $rCtx);
+		$rFilterKind = match ($rView) {
+			'live', 'movies', 'series' => $rView,
+			'never' => $rKind,
+			default => null,
+		};
 
 		$rHtml = '<ul class="nav nav-tabs mb-3">';
 		foreach (self::TABS as $rKey => $rLabel) {
@@ -53,7 +69,8 @@ final class UsageAuditPage {
 		foreach (self::DAYS as $d => $rLabel) {
 			$rHtml .= '<option value="' . $d . '"' . ($rDays === $d ? ' selected' : '') . '>' . $h($rLabel) . '</option>';
 		}
-		$rHtml .= '</select><input type="search" name="q" value="' . $h($rSearch) . '" class="form-control form-control-sm" style="width:220px" placeholder="Name">'
+		$rHtml .= '</select>' . ($rFilterKind === null ? '' : self::categoryFilter($rFilterKind, $rCtx, $rSeries['series']))
+			. '<input type="search" name="q" value="' . $h($rSearch) . '" class="form-control form-control-sm" style="width:220px" placeholder="Name">'
 			. '<button class="btn btn-sm btn-primary" type="submit">Apply</button></form>' . self::notes($rCtx);
 
 		return $rHtml . match ($rView) {
@@ -103,7 +120,7 @@ final class UsageAuditPage {
 
 	/** @param array<string, mixed> $rCtx */
 	private static function notes(array $rCtx): string {
-		$rOut = '';
+		$rOut = $rCtx['separators'] > 0 ? '<p class="text-muted small mb-2">' . $rCtx['separators'] . ' category separators ("=Name=") are left out: they head a list, nobody watches them.</p>' : '';
 		if ($rCtx['coverage'] === 0) {
 			$rOut .= '<div class="alert alert-warning py-2">The activity log is empty: nothing has been watched yet, or the panel does not keep it.</div>';
 		} elseif ($rCtx['coverage'] > $rCtx['from']) {
@@ -193,7 +210,7 @@ final class UsageAuditPage {
 	private static function usageTable(string $rTitle, array $rGroups, array $rTotal, array $rCtx, bool $rLiveCols): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rSpan = max(1, $rCtx['now'] - $rCtx['from']);
-		$rRows = array_filter($rGroups, static fn ($g, $k): bool => $rCtx['search'] === '' || mb_stripos(self::name($k, $rCtx), $rCtx['search']) !== false, ARRAY_FILTER_USE_BOTH);
+		$rRows = array_filter($rGroups, static fn ($g, $k): bool => ($rCtx['search'] === '' || mb_stripos(self::name($k, $rCtx), $rCtx['search']) !== false) && self::inCategories($k, $rCtx), ARRAY_FILTER_USE_BOTH);
 		$rSecs = array_sum(array_column($rGroups, 'secs'));
 		$rHtml = '<p class="text-muted small">' . $h($rTitle) . ': ' . count($rGroups) . ' watched, ' . number_format($rSecs / 3600, 1) . ' viewer-hours'
 			. ($rTotal['secs'] > 0 ? ' (' . round($rSecs / $rTotal['secs'] * 100) . '% of all viewing)' : '') . '. "Lines" counts lines that stayed at least a minute; "Most at once" is the most viewers at the same moment.</p>';
@@ -284,9 +301,7 @@ final class UsageAuditPage {
 		$rIDs = $rNever[$rKind];
 		$rIsSeries = $rKind === 'series';
 		$rName = static fn (int $id): string => $rIsSeries ? $rCtx['series'][$id]['name'] : $rCtx['streams'][$id]['name'];
-		if ($rCtx['search'] !== '') {
-			$rIDs = array_values(array_filter($rIDs, static fn (int $id): bool => mb_stripos($rName($id), $rCtx['search']) !== false));
-		}
+		$rIDs = array_values(array_filter($rIDs, static fn (int $id): bool => ($rCtx['search'] === '' || mb_stripos($rName($id), $rCtx['search']) !== false) && self::inCategories($rIsSeries ? 's' . $id : $id, $rCtx)));
 		// When each was last watched, as far back as the log goes: for a series, its latest episode.
 		$rEpisodes = [];
 		if ($rIsSeries) {
@@ -338,6 +353,50 @@ final class UsageAuditPage {
 			$rHtml .= '<td class="small">' . (($rLast[$rID] ?? 0) > 0 ? date('Y-m-d H:i', $rLast[$rID]) . ' <span class="text-muted">(' . self::ago($rCtx['now'] - $rLast[$rID]) . ')</span>' : '<span class="text-muted">not in the log</span>') . '</td></tr>';
 		}
 		return $rHtml . '</tbody></table></div>' . (count($rIDs) > self::MAX_ROWS ? '<p class="text-muted small">First ' . self::MAX_ROWS . ' of ' . count($rIDs) . '.</p>' : '');
+	}
+
+	/**
+	 * A multiple choice of the categories that hold something of this kind.
+	 *
+	 * @param array<string, mixed>                                   $rCtx
+	 * @param array<int, array{name:string, categories:list<int>}> $rSeries
+	 */
+	private static function categoryFilter(string $rKind, array $rCtx, array $rSeries): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rUsed = [];
+		if ($rKind === 'series') {
+			foreach ($rSeries as $s) {
+				$rUsed += array_fill_keys($s['categories'], true);
+			}
+		} else {
+			$rTypes = $rKind === 'movies' ? [UsageAuditRepository::MOVIE_TYPE] : [...UsageAuditRepository::LIVE_TYPES, UsageAuditRepository::RADIO_TYPE];
+			foreach ($rCtx['streams'] as $s) {
+				if (in_array($s['type'], $rTypes, true)) {
+					$rUsed += array_fill_keys($s['categories'], true);
+				}
+			}
+		}
+		$rOptions = [];
+		foreach ($rCtx['categories'] as $rID => $c) {
+			if (isset($rUsed[$rID]) && in_array($c['type'], self::CATEGORY_TYPES[$rKind], true)) {
+				$rOptions[$rID] = $c['name'];
+			}
+		}
+		natcasesort($rOptions);
+		$rHtml = '<select name="cat[]" id="usage-audit-cat" multiple class="form-select form-select-sm" style="width:auto;min-width:240px" data-placeholder="All categories" size="1">';
+		foreach ($rOptions as $rID => $rName) {
+			$rHtml .= '<option value="' . (int) $rID . '"' . (in_array($rID, $rCtx['cats'], true) ? ' selected' : '') . '>' . $h($rName) . '</option>';
+		}
+		return $rHtml . '</select><script>window.addEventListener("load",function(){if(window.jQuery&&jQuery.fn.select2){jQuery("#usage-audit-cat").select2({placeholder:"All categories",allowClear:true,width:"320px"});}});</script>';
+	}
+
+	/** @param array<string, mixed> $rCtx */
+	private static function inCategories(int|string $rKey, array $rCtx): bool {
+		if ($rCtx['cats'] === []) {
+			return true;
+		}
+		$rIDs = is_string($rKey) ? ($rCtx['series'][(int) substr($rKey, 1)]['categories'] ?? []) : ($rCtx['streams'][$rKey]['categories'] ?? []);
+		return array_intersect($rIDs, $rCtx['cats']) !== [];
 	}
 
 	/** @param array<string, mixed> $rCtx */

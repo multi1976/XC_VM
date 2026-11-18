@@ -19,7 +19,7 @@ class UsageAuditModule extends BaseModule {
 	}
 
 	public function getVersion(): string {
-		return '0.1.0';
+		return '0.1.1';
 	}
 
 	public function registerRoutes(Router $router): void {

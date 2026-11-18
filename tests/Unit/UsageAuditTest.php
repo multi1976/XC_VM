@@ -82,8 +82,8 @@ final class UsageAuditTest extends TestCase {
 			$rDb->query(
 				"INSERT INTO `streams` (`id`, `type`, `stream_display_name`, `category_id`, `stream_source`, `added`) VALUES
 				 (1, 1, 'News 24', '[1]', '[\"http://a/1\"]', ?), (2, 1, 'Sport <HD>', '[2]', '[\"http://a/2\",\"http://b/2\"]', ?), (3, 1, 'Idle Always On', '[2]', '[\"http://a/3\"]', ?),
-				 (4, 1, 'Hidden', '[1]', '[]', ?), (5, 2, 'A Movie', '[3]', NULL, ?), (6, 2, 'Unseen Movie', '[3]', NULL, ?), (7, 5, 'S01E01', NULL, NULL, ?)",
-				$rNow, $rNow, $rNow, $rNow, $rNow, $rNow, $rNow
+				 (4, 1, 'Hidden', '[1]', '[]', ?), (5, 2, 'A Movie', '[3]', NULL, ?), (6, 2, 'Unseen Movie', '[3]', NULL, ?), (7, 5, 'S01E01', NULL, NULL, ?), (8, 1, '=SPORT=', '[2]', '[]', ?)",
+				$rNow, $rNow, $rNow, $rNow, $rNow, $rNow, $rNow, $rNow
 			);
 			$rDb->query("INSERT INTO `streams_series` (`id`, `title`, `category_id`) VALUES (1, 'Watched Show', '[4]'), (2, 'Unseen Show', '[4]')");
 			$rDb->query('INSERT INTO `streams_episodes` (`series_id`, `stream_id`) VALUES (1, 7)');
@@ -130,6 +130,26 @@ final class UsageAuditTest extends TestCase {
 			$this->assertSame($rNow - 40 * 86400, UsageAuditRepository::coverage());
 			$this->assertStringContainsString('News 24', $rView('live', ['q' => 'news']));
 			$this->assertStringNotContainsString('Sport &lt;HD', $rView('live', ['q' => 'news']));
+
+			// Category separators count nowhere, even when a player opened one.
+			$rDb->query('INSERT INTO `lines_activity` (`user_id`, `stream_id`, `server_id`, `date_start`, `date_end`) VALUES (1, 8, 1, ?, ?)', $rNow - 500, $rNow - 400);
+			foreach (['live', 'never', 'overview'] as $v) {
+				$this->assertStringNotContainsString('=SPORT=', $rView($v), $v);
+			}
+			$this->assertStringContainsString('1 category separators', $rView('live'));
+			$this->assertTrue(UsageAuditAnalyzer::isSeparator('=== NEWS ==='));
+			$this->assertFalse(UsageAuditAnalyzer::isSeparator('News = Live'));
+
+			// The category filter: one or more categories.
+			$rSport = $rView('live', ['cat' => ['2']]);
+			$this->assertStringContainsString('Sport &lt;HD', $rSport);
+			$this->assertStringNotContainsString('News 24</a>', $rSport);
+			$this->assertMatchesRegularExpression('/<option value="2" selected>Sport<\/option>/', $rSport);
+			$this->assertStringNotContainsString('>Films</option>', $rSport);                       // a movie category is no choice for channels
+			$this->assertMatchesRegularExpression('/News 24<\/a>.*Sport &lt;HD/s', $rView('live', ['cat' => ['1', '2']]));
+			$rNeverNews = $rView('never', ['cat' => ['1']]);
+			$this->assertStringContainsString('Hidden', $rNeverNews);
+			$this->assertStringNotContainsString('Idle Always On', $rNeverNews);
 		} finally {
 			DatabaseFactory::reset();
 		}

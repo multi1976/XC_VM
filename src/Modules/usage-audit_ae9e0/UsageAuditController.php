@@ -20,7 +20,7 @@ class UsageAuditController extends BaseAjaxController {
 		try {
 			$rBody = UsageAuditPage::render([
 				'view' => RequestManager::get('view', ''), 'days' => RequestManager::get('days', 7),
-				'kind' => RequestManager::get('kind', ''), 'q' => RequestManager::get('q', ''),
+				'kind' => RequestManager::get('kind', ''), 'q' => RequestManager::get('q', ''), 'cat' => RequestManager::get('cat', []),
 			], time());
 		} catch (\Throwable $e) {
 			error_log('usage-audit: ' . $e->getMessage());
