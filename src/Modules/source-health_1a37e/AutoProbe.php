@@ -24,6 +24,12 @@ use XcVm\Infrastructure\Database\DatabaseAware;
 final class AutoProbe {
 	use DatabaseAware;
 
+	/**
+	 * Off. 0.6.0 ran these and live connections fell on a production panel
+	 * the same evening: until the cause is known, Auto-rank makes no probe of
+	 * its own (the admin's "Probe every source" streams are unchanged).
+	 */
+	public const ENABLED = false;
 	public const PER_RUN = 4;
 	public const BUDGET_SEC = 60;
 	public const PROPOSED_EVERY_SEC = 2 * 3600;
@@ -31,6 +37,9 @@ final class AutoProbe {
 
 	/** @return int probes made */
 	public static function run(int $rNow, string $rProbe, string $rFfmpeg): int {
+		if (!self::ENABLED) {
+			return 0;
+		}
 		$rDue = self::plan(self::candidates($rNow), SourceHealthRepository::onAirSources(), SourceHealthRepository::accounts(), SourceHealthRepository::auditState(), $rNow);
 		$rStarted = time();
 		$rDone = 0;
@@ -58,6 +67,13 @@ final class AutoProbe {
 	public static function plan(array $rCandidates, array $rOnAir, array $rAccounts, array $rAudit, int $rNow, int $rMax = self::PER_RUN): array {
 		$rLive = array_flip(array_map('trim', $rOnAir));
 		$rBusy = SourceAudit::busyAccounts($rOnAir);
+		$rBusyLogins = [];
+		foreach ($rOnAir as $rSource) {
+			$rLogin = SourceFinder::login((string) $rSource);
+			if ($rLogin !== null) {
+				$rBusyLogins[$rLogin] = true;
+			}
+		}
 		usort($rCandidates, static fn (array $a, array $b): int => [$a['why'] === 'proposed' ? 0 : 1, $a['last']] <=> [$b['why'] === 'proposed' ? 0 : 1, $b['last']]);
 		$rOut = [];
 		$rTaken = [];
@@ -67,7 +83,8 @@ final class AutoProbe {
 			if (count($rOut) >= $rMax || $rNow - $c['last'] < $c['every'] || isset($rLive[$rSource]) || isset($rTaken[$rKey])
 				|| !in_array(strtolower((string) parse_url($rSource, PHP_URL_SCHEME)), SourceProber::SCHEMES, true)
 				|| in_array((string) ($rAudit[md5($rSource)]['status'] ?? ''), ['dead', 'down'], true)
-				|| (isset($rBusy[$rKey]) && !ProviderAccount::admits($rAccounts[md5($rKey)] ?? null, $rNow))) {
+				|| (isset($rBusy[$rKey]) && !ProviderAccount::admits($rAccounts[md5($rKey)] ?? null, $rNow))
+				|| (!isset($rBusy[$rKey]) && isset($rBusyLogins[(string) SourceFinder::login($rSource)]))) {   // the same login on air through another domain
 				continue;
 			}
 			$rTaken[$rKey] = true;
