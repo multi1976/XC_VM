@@ -67,7 +67,7 @@ final class LineAuditPage {
 		$rExpiredTrying = array_filter($rScope, static fn (array $l): bool => (int) $l['exp_date'] > 0 && (int) $l['exp_date'] <= $rNow && isset($rRefusals[(int) $l['id']]['USER_EXPIRED']));
 		$rLastSession = LineAuditRepository::lastSessions(array_keys($rScope));
 		$rUnused = array_filter($rScope, static fn (array $l): bool => self::unused($l, $rNow, $rLastSession[(int) $l['id']] ?? 0, isset($rLive[(int) $l['id']])));
-		uasort($rUnused, static fn (array $a, array $b): int => max((int) $a['last_activity'], $rLastSession[(int) $a['id']] ?? 0) <=> max((int) $b['last_activity'], $rLastSession[(int) $b['id']] ?? 0));
+		uasort($rUnused, static fn (array $a, array $b): int => ($rLastSession[(int) $a['id']] ?? 0) <=> ($rLastSession[(int) $b['id']] ?? 0));
 		$rUnstable = array_filter($rScope, static fn (array $l): bool => LineAuditAnalyzer::unstable($rHistory[(int) $l['id']] ?? null));
 		uasort($rUnstable, static fn (array $a, array $b): int => ($rHistory[(int) $b['id']]['short'] ?? 0) <=> ($rHistory[(int) $a['id']]['short'] ?? 0));
 
@@ -103,7 +103,7 @@ final class LineAuditPage {
 			. '<button class="btn btn-sm btn-primary" type="submit">Apply</button>'
 			. '<small class="text-muted ms-2">' . count($rScope) . ' lines · ' . array_sum(array_intersect_key($rLive, $rScope)) . ' connections now</small></form>';
 
-		$rCtx = ['handovers' => $rHandovers, 'players' => $rPlayers, 'lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
+		$rCtx = ['last_session' => $rLastSession, 'handovers' => $rHandovers, 'players' => $rPlayers, 'lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
 		return $rHtml . match ($rView) {
 			'sharing'  => self::sharingTab($rSharing, $rCtx),
 			'limits'   => self::limitsTab($rLimits, $rCtx),
@@ -118,15 +118,17 @@ final class LineAuditPage {
 
 	/**
 	 * Enabled, not expired, created over UNUSED_DAYS ago, not connected now,
-	 * and used neither by the line's own record (`last_activity`) nor by any
-	 * session in the activity log for as long. `last_activity` alone is not
-	 * enough: a panel can leave it behind while the line is watched, and
-	 * lines in use were listed here (and deleted from here) because of it.
+	 * and no session in the activity log ending in as long.
+	 *
+	 * Not `lines.last_activity`: the core keeps there the id of the line's
+	 * last lines_activity row (LogSink::lastActivity), not a time. Read as a
+	 * time it is always decades old, so every line looked unused; lines in
+	 * use were listed here, and deleted from here, because of it.
 	 */
 	public static function unused(array $l, int $rNow, int $rLastSession = 0, bool $rLive = false): bool {
 		$rCut = $rNow - self::UNUSED_DAYS * 86400;
 		return self::enabled($l) && !$rLive && ((int) $l['exp_date'] === 0 || (int) $l['exp_date'] > $rNow)
-			&& (int) $l['last_activity'] < $rCut && $rLastSession < $rCut && (int) $l['created_at'] < $rCut;
+			&& $rLastSession < $rCut && (int) $l['created_at'] < $rCut;
 	}
 
 	private static function enabled(array $l): bool {
@@ -297,7 +299,7 @@ final class LineAuditPage {
 			$rHtml .= self::head(['Expires', 'Last used']);
 			foreach (array_slice($rExpiring, 0, self::MAX_ROWS, true) as $l) {
 				$rHtml .= '<tr>' . self::lineCells($l, $rCtx) . '<td>' . $h(date('Y-m-d H:i', (int) $l['exp_date'])) . ' <small class="text-muted">in ' . LineAuditAnalyzer::duration((int) $l['exp_date'] - $rCtx['now']) . '</small></td>'
-					. '<td><small>' . self::ago((int) $l['last_activity'], $rCtx['now']) . '</small></td></tr>';
+					. '<td><small>' . self::lastUsed((int) $l['id'], $rCtx) . '</small></td></tr>';
 			}
 			$rHtml .= self::tail(count($rExpiring));
 		}
@@ -336,6 +338,15 @@ final class LineAuditPage {
 		return $rHtml . self::tail(count($rChanges));
 	}
 
+	/** When the line's last session ended, from the activity log; "connected now" while it has one open. */
+	private static function lastUsed(int $rID, array $rCtx): string {
+		if (isset($rCtx['live'][$rID])) {
+			return '<span class="text-success">connected now</span>';
+		}
+		$rAt = (int) ($rCtx['last_session'][$rID] ?? 0);
+		return $rAt > 0 ? self::ago($rAt, $rCtx['now']) : 'never';
+	}
+
 	private static function unusedTab(array $rUnused, array $rCtx): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rHtml = '<p class="text-muted small">Enabled, not expired, created over ' . self::UNUSED_DAYS . ' days ago, not connected now, and with no session for ' . self::UNUSED_DAYS . ' days or more, '
@@ -346,7 +357,7 @@ final class LineAuditPage {
 		}
 		$rHtml .= self::head(['Last used', 'Created', 'Expires']);
 		foreach (array_slice($rUnused, 0, self::MAX_ROWS, true) as $l) {
-			$rHtml .= '<tr>' . self::lineCells($l, $rCtx) . '<td><small>' . self::ago((int) $l['last_activity'], $rCtx['now']) . '</small></td>'
+			$rHtml .= '<tr>' . self::lineCells($l, $rCtx) . '<td><small>' . self::lastUsed((int) $l['id'], $rCtx) . '</small></td>'
 				. '<td><small>' . $h((int) $l['created_at'] > 0 ? date('Y-m-d', (int) $l['created_at']) : '–') . '</small></td>'
 				. '<td><small>' . $h((int) $l['exp_date'] > 0 ? date('Y-m-d', (int) $l['exp_date']) : 'never') . '</small></td></tr>';
 		}

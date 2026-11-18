@@ -205,9 +205,9 @@ final class LineAuditTest extends TestCase {
 			// mover: a month on ISP One, then today on ISP Two only.
 			$rDb->query("INSERT INTO `lines_activity` (`user_id`, `stream_id`, `server_id`, `user_ip`, `isp`, `user_agent`, `date_start`, `date_end`) VALUES
 				(1, 1, 1, '10.0.0.1', 'ISP One', 'VLC', ?, ?), (1, 1, 1, '10.0.0.1', 'ISP One', 'VLC', ?, ?)", $rNow - 30 * 86400, $rNow - 30 * 86400 + 600, $rNow - 3 * 86400, $rNow - 3 * 86400 + 600);
-			$this->assertSame(2, LineAuditRepository::recordIsps($rNow - 7200, $rNow - 8100, []));   // first run: the whole log, and the line's current ISP
+			$this->assertSame(1, LineAuditRepository::recordIsps($rNow - 7200, $rNow - 8100, []));   // first run: the whole activity log
 			$rDb->query("INSERT INTO `lines_activity` (`user_id`, `stream_id`, `server_id`, `user_ip`, `isp`, `user_agent`, `date_start`, `date_end`) VALUES (1, 1, 1, '10.0.0.2', 'ISP Two', 'VLC', ?, ?)", $rNow - 3600, $rNow - 1800);
-			LineAuditRepository::recordIsps($rNow, $rNow - 900, []);
+			LineAuditRepository::recordIsps($rNow, $rNow - 3600, []);   // a run that looks back over the session that just ended
 			$this->assertSame(['ISP One', 'ISP Two'], array_column(LineAuditRepository::ispHistory($rNow - 86400)[1], 'isp'));
 			$rIsp = LineAuditPage::render(['view' => 'isp'], $rNow);
 			$this->assertStringContainsString('>mover</a>', $rIsp);
@@ -217,6 +217,9 @@ final class LineAuditTest extends TestCase {
 			// Unused: a stale `last_activity` is not enough when the activity log has a recent session.
 			$rDb->query("INSERT INTO `lines` (`id`, `member_id`, `username`, `password`, `max_connections`, `exp_date`, `enabled`, `admin_enabled`, `last_activity`, `created_at`, `is_restreamer`, `is_mag`, `isp_desc`, `is_isplock`) VALUES (5, 0, 'stale', 'x', 10, NULL, 1, 1, ?, ?, 1, 0, '', 0)", $rOld, $rOld);
 			$rDb->query("INSERT INTO `lines_activity` (`user_id`, `stream_id`, `server_id`, `user_ip`, `isp`, `user_agent`, `date_start`, `date_end`) VALUES (5, 1, 1, '10.0.0.9', 'ISP', 'VLC', ?, ?)", $rNow - 3 * 86400, $rNow - 3 * 86400 + 600);
+			// `last_activity` is the id of the line's last activity row, not a time: it says nothing here.
+			$rDb->query("INSERT INTO `lines_activity` (`user_id`, `stream_id`, `server_id`, `user_ip`, `isp`, `user_agent`, `date_start`, `date_end`) VALUES (4, 1, 1, '10.0.0.8', 'ISP', 'VLC', ?, ?)", $rNow - 86400, $rNow - 80000);
+			$rDb->query('UPDATE `lines` SET `last_activity` = 12345 WHERE `id` IN (2, 4)');
 			$rUnused = LineAuditPage::render(['view' => 'unused'], $rNow);
 			$this->assertStringContainsString('>gone</a>', $rUnused);
 			$this->assertStringNotContainsString('>stale</a>', $rUnused);

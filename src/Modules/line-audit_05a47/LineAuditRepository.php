@@ -157,8 +157,9 @@ final class LineAuditRepository {
 
 	/**
 	 * Remember the ISPs lines are used from: those of the sessions that ended
-	 * since $rSince, of the lines used since then (their current ISP) and of
-	 * the connections live now. The first run reads the whole activity log.
+	 * since $rSince and of the connections live now. The first run reads the
+	 * whole activity log. Not `lines.isp_desc` with `last_activity`: that
+	 * column holds an activity row id, not a time.
 	 *
 	 * @param list<array{user_id:int, isp:string, date_start:int}> $rLive
 	 * @return int rows written
@@ -184,9 +185,6 @@ final class LineAuditRepository {
 		) ?: [];
 		foreach ($rSessions as $r) {
 			$rAdd((int) $r['user_id'], (string) $r['isp'], (int) $r['f'], (int) $r['l']);
-		}
-		foreach (self::db()->fetchAll("SELECT `id`, `isp_desc`, `last_activity` FROM `lines` WHERE `isp_desc` IS NOT NULL AND `isp_desc` <> '' AND `last_activity` >= ?", $rEmpty ? 0 : $rSince) ?: [] as $r) {
-			$rAdd((int) $r['id'], (string) $r['isp_desc'], (int) $r['last_activity'], (int) $r['last_activity']);
 		}
 		foreach ($rLive as $c) {
 			$rAdd((int) $c['user_id'], (string) ($c['isp'] ?? ''), (int) ($c['date_start'] ?? 0), $rNow);
