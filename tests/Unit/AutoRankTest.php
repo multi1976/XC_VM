@@ -203,6 +203,6 @@ final class AutoRankTest extends TestCase {
 		$this->assertNotContains($rBusyBackup, array_column(AutoProbe::plan($rCands, $rOnAir, [$rKey => ['api' => true, 'max' => 2, 'active' => 2, 'checked_at' => $t - 60]], $rAudit, $t, 10), 'source'));
 		// The login on air through another domain is the same account: never probed.
 		$this->assertSame([], AutoProbe::plan([$c('http://alias.example:8080/live/a/b/9.ts', 'profile')], $rOnAir, [], [], $t, 10));
-		$this->assertFalse(AutoProbe::ENABLED);
+		$this->assertTrue(AutoProbe::ENABLED);
 	}
 }

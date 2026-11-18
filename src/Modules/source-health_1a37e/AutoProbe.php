@@ -25,11 +25,11 @@ final class AutoProbe {
 	use DatabaseAware;
 
 	/**
-	 * Off. 0.6.0 ran these and live connections fell on a production panel
-	 * the same evening: until the cause is known, Auto-rank makes no probe of
-	 * its own (the admin's "Probe every source" streams are unchanged).
+	 * On. Switched off in 0.6.1 while a fall in live connections was looked
+	 * into; it came from lines deleted on Line Audit's Unused tab, not from
+	 * these probes, which were found to leave the streams alone.
 	 */
-	public const ENABLED = false;
+	public const ENABLED = true;
 	public const PER_RUN = 4;
 	public const BUDGET_SEC = 60;
 	public const PROPOSED_EVERY_SEC = 2 * 3600;
