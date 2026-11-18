@@ -12,7 +12,7 @@ final class LineAuditPage {
 
 	private const MAX_ROWS = 500;
 	private const TABS = [
-		'overview' => 'Overview', 'sharing' => 'Shared accounts', 'limits' => 'Connection limits', 'refused' => 'Refused',
+		'overview' => 'Overview', 'sharing' => 'Shared accounts', 'restreamers' => 'Restreamers', 'limits' => 'Connection limits', 'refused' => 'Refused',
 		'isp' => 'ISP changes', 'expiry' => 'Expiring', 'unused' => 'Unused', 'unstable' => 'Unstable clients',
 	];
 
@@ -27,8 +27,10 @@ final class LineAuditPage {
 
 		$rLines = LineAuditRepository::lines();
 		$rLive = [];
+		$rLiveConns = [];
 		foreach (LineAuditRepository::liveConnections() as $c) {
 			$rLive[$c['user_id']] = ($rLive[$c['user_id']] ?? 0) + 1;
+			$rLiveConns[$c['user_id']][] = $c;
 		}
 		$rHistory = LineAuditRepository::history($rFrom);
 		$rSamples = LineAuditRepository::sampleStats($rFrom);
@@ -42,8 +44,18 @@ final class LineAuditPage {
 		$rScope = array_filter($rLines, $rKeep);
 
 		// Findings, per tab.
+		// Restreamers are judged apart (Restreamers tab): many connections and
+		// handovers are what they are for; a second program or a viewer's player is not.
+		$rIsRestream = static fn (array $l): bool => (int) $l['is_restreamer'] === 1;
+		$rRestreamIDs = array_keys(array_filter($rScope, $rIsRestream));
+		$rRestreamHistory = LineAuditRepository::restreamHistory($rRestreamIDs);
+		$rRestream = [];
+		foreach ($rRestreamIDs as $rID) {
+			$rRestream[$rID] = LineAuditAnalyzer::restreamer($rRestreamHistory['uas'][$rID] ?? [], $rRestreamHistory['isps'][$rID] ?? [], $rLiveConns[$rID] ?? [], $rFrom);
+		}
+		uasort($rRestream, static fn (array $a, array $b): int => $b['score'] <=> $a['score']);
 		$rSharing = [];
-		foreach ($rScope as $rID => $l) {
+		foreach (array_filter($rScope, static fn (array $l): bool => !$rIsRestream($l)) as $rID => $l) {
 			$s = LineAuditAnalyzer::sharing($rSamples[$rID] ?? null, $rHistory[$rID] ?? null, $rPlayers[$rID] ?? [], $rHandovers[$rID] ?? null);
 			if ($s['level'] !== 'none') {
 				$rSharing[$rID] = $s;
@@ -68,7 +80,7 @@ final class LineAuditPage {
 		$rLastSession = LineAuditRepository::lastSessions(array_keys($rScope));
 		$rUnused = array_filter($rScope, static fn (array $l): bool => self::unused($l, $rNow, $rLastSession[(int) $l['id']] ?? 0, isset($rLive[(int) $l['id']])));
 		uasort($rUnused, static fn (array $a, array $b): int => ($rLastSession[(int) $a['id']] ?? 0) <=> ($rLastSession[(int) $b['id']] ?? 0));
-		$rUnstable = array_filter($rScope, static fn (array $l): bool => LineAuditAnalyzer::unstable($rHistory[(int) $l['id']] ?? null));
+		$rUnstable = array_filter($rScope, static fn (array $l): bool => !$rIsRestream($l) && LineAuditAnalyzer::unstable($rHistory[(int) $l['id']] ?? null));
 		uasort($rUnstable, static fn (array $a, array $b): int => ($rHistory[(int) $b['id']]['short'] ?? 0) <=> ($rHistory[(int) $a['id']]['short'] ?? 0));
 
 		$rIspChanges = [];
@@ -81,7 +93,7 @@ final class LineAuditPage {
 		uasort($rIspChanges, static fn (array $a, array $b): int => [$a['kind'] === 'added' ? 0 : 1, -$a['since']] <=> [$b['kind'] === 'added' ? 0 : 1, -$b['since']]);
 
 		$rCounts = [
-			'sharing' => count($rSharing), 'limits' => count($rLimits), 'refused' => count($rRefused), 'isp' => count($rIspChanges),
+			'sharing' => count($rSharing), 'restreamers' => count(array_filter($rRestream, static fn (array $r): bool => $r['level'] !== 'ok')), 'limits' => count($rLimits), 'refused' => count($rRefused), 'isp' => count($rIspChanges),
 			'expiry' => count($rExpiring) + count($rExpiredTrying), 'unused' => count($rUnused), 'unstable' => count($rUnstable),
 		];
 		// Header: tabs, window, filters.
@@ -106,6 +118,7 @@ final class LineAuditPage {
 		$rCtx = ['last_session' => $rLastSession, 'handovers' => $rHandovers, 'players' => $rPlayers, 'lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
 		return $rHtml . match ($rView) {
 			'sharing'  => self::sharingTab($rSharing, $rCtx),
+			'restreamers' => self::restreamTab($rRestream, $rCtx),
 			'limits'   => self::limitsTab($rLimits, $rCtx),
 			'refused'  => self::refusedTab($rRefused, $rCtx),
 			'isp'      => self::ispTab($rIspChanges, $rCtx),
@@ -169,6 +182,7 @@ final class LineAuditPage {
 		$rLikely = count(array_filter($rSharing, static fn (array $s): bool => $s['level'] === 'likely'));
 		$rCards = [
 			['sharing', 'Shared accounts', $rLikely . ' likely · ' . ($rCounts['sharing'] - $rLikely) . ' to look at', 'Used from several countries or IPs at once, or from many in ' . self::window($rCtx) . '.'],
+			['restreamers', 'Restreamers', $rCounts['restreamers'] . ' to look at', 'Restream lines judged apart: a viewer\'s player on one, a second program, or pulls from two ISPs at once say it is used elsewhere too.'],
 			['limits', 'At their limit', (string) $rCounts['limits'], 'Lines that use every connection they are allowed, now or in ' . self::window($rCtx) . ': more viewers than the line allows, or a limit set too low.'],
 			['refused', 'Refused', (string) $rCounts['refused'], 'Lines with refused attempts: expired, banned, wrong IP or country, not in bouquet…'],
 			['isp', 'ISP changes', (string) $rCounts['isp'], 'Lines that started coming from an ISP they never used before, in ' . self::window($rCtx) . ': a move, or a line passed on.'],
@@ -201,12 +215,50 @@ final class LineAuditPage {
 		return $rHtml . '</div>';
 	}
 
+	private static function restreamTab(array $rRestream, array $rCtx): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rHtml = '<p class="text-muted small">Lines marked restreamer: another panel pulling channels. Many connections and handovers are what such a line is for, so they are not counted here (nor in Shared accounts). '
+			. 'A restream panel pulls with one program, from one place: what says the line is used elsewhere too is <strong>a viewer\'s player</strong> on it (TiviMate, Smarters, VLC, a TV…), '
+			. '<strong>a second program</strong>, <strong>pulls from two ISPs at once</strong>, and a user agent or an ISP it <strong>never used before</strong> ' . self::window($rCtx) . '. '
+			. 'User agents and ISPs are recorded every five minutes from the connections open, as a restream connection can stay open for weeks.</p>';
+		if ($rRestream === []) {
+			return $rHtml . '<p class="text-muted mb-0">No restreamer line.</p>';
+		}
+		$rHtml .= self::head(['Verdict', 'Why', 'User agents', 'ISPs', 'IPs now']);
+		foreach (array_slice($rRestream, 0, self::MAX_ROWS, true) as $rID => $r) {
+			$l = $rCtx['lines'][$rID];
+			[$rLabel, $rClass, $rRow] = match ($r['level']) {
+				'likely' => ['Used elsewhere', 'bg-label-danger', 'table-danger'],
+				'check'  => ['Check', 'bg-label-warning', 'table-warning'],
+				default  => ['OK', 'bg-label-success', ''],
+			};
+			$rUas = '';
+			foreach ($r['uas'] as $u) {
+				$rPlayer = LineAuditAnalyzer::isPlayer($u['family']);
+				$rUas .= '<div class="' . ($rPlayer ? 'text-danger' : '') . '"><span class="badge ' . ($rPlayer ? 'bg-label-danger' : 'bg-label-secondary') . '">' . $h($u['family']) . '</span> '
+					. '<code class="small" title="' . $h($u['ua']) . '">' . $h(mb_strimwidth($u['ua'] !== '' ? $u['ua'] : '(none)', 0, 48, '…')) . '</code>'
+					. ($u['now'] ? ' <span class="badge bg-label-success">now</span>' : '') . ($u['new'] ? ' <span class="badge bg-label-warning">new</span>' : '') . '</div>';
+			}
+			$rIsps = '';
+			foreach ($r['isps'] as $i) {
+				$rIsps .= '<div>' . $h($i['isp']) . ($i['now'] ? ' <span class="badge bg-label-success">now</span>' : '') . ($i['new'] ? ' <span class="badge bg-label-warning">new</span>' : '') . '</div>';
+			}
+			$rHtml .= '<tr class="' . $rRow . '">' . self::lineCells($l, $rCtx)
+				. '<td><span class="badge ' . $rClass . '">' . $rLabel . '</span></td>'
+				. '<td><small>' . ($r['reasons'] !== [] ? $h(implode('; ', $r['reasons'])) : '<span class="text-muted">one program, one place</span>') . '</small></td>'
+				. '<td><small>' . ($rUas !== '' ? $rUas : '<span class="text-muted">none seen yet</span>') . '</small></td>'
+				. '<td><small>' . ($rIsps !== '' ? $rIsps : '<span class="text-muted">none seen yet</span>') . '</small></td>'
+				. '<td class="text-center">' . $r['ips_now'] . '</td></tr>';
+		}
+		return $rHtml . self::tail(count($rRestream));
+	}
+
 	private static function sharingTab(array $rSharing, array $rCtx): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rHtml = '<p class="text-muted small">Lines used from several places. <strong>At the same time</strong> comes from the live connections, looked at every five minutes '
 			. '(two countries at once cannot be one household); the rest from the sessions of ' . self::window($rCtx) . '. '
 			. 'On a line with one or two connections a shared account is rarely seen at once: the panel closes the older connection when a new one opens, '
-			. 'so the places take it from each other, back and forth. <strong>Handovers</strong> counts those (a return is A, B, then A again). A restreamer is expected to look like this. '
+			. 'so the places take it from each other, back and forth. <strong>Handovers</strong> counts those (a return is A, B, then A again). Restreamer lines are not here: they have their own tab. '
 			. 'A phone on mobile data and a TV at home are two IPs and two ISPs: one sign alone is a note, not a verdict.</p>';
 		if ($rSharing === []) {
 			return $rHtml . '<p class="text-muted mb-0">Nothing found.</p>';

@@ -35,3 +35,16 @@ CREATE TABLE IF NOT EXISTS `line_audit_isps` (
   PRIMARY KEY (`user_id`, `isp_hash`),
   KEY `first_seen` (`first_seen`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Every user agent a restreamer line has pulled with, when first and last
+-- seen. A restream panel pulls with one: a second one, or a player's, says
+-- the line is used somewhere else too.
+CREATE TABLE IF NOT EXISTS `line_audit_uas` (
+  `user_id` int(11) NOT NULL,
+  `ua_hash` char(32) NOT NULL,
+  `ua` varchar(255) NOT NULL,
+  `first_seen` int(11) NOT NULL,
+  `last_seen` int(11) NOT NULL,
+  PRIMARY KEY (`user_id`, `ua_hash`),
+  KEY `last_seen` (`last_seen`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

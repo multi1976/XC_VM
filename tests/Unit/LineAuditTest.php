@@ -227,8 +227,50 @@ final class LineAuditTest extends TestCase {
 			$this->assertStringNotContainsString('>busy</a>', $rUnused);
 			$this->assertStringNotContainsString('checkbox', $rUnused);                                          // nothing to delete from here
 			$this->assertStringNotContainsString('line_audit_delete', $rUnused);
+
+			// Restreamers: their user agents are recorded and judged on their own tab, not in Shared accounts.
+			$this->assertSame(1, LineAuditRepository::recordUas($rNow, $rNow - 900, [['user_id' => 5, 'ua' => 'Lavf/60.3.100', 'date_start' => $rNow - 600], ['user_id' => 1, 'ua' => 'VLC', 'date_start' => $rNow]]) - 1);   // VLC from its session, Lavf live; line 1 is no restreamer
+			$rTab = LineAuditPage::render(['view' => 'restreamers', 'days' => 7], $rNow);
+			$this->assertStringContainsString('>stale</a>', $rTab);
+			$this->assertStringContainsString("a viewer's player on a restream line: VLC", html_entity_decode($rTab, ENT_QUOTES));
+			$this->assertStringContainsString('Lavf/60.3.100', $rTab);
+			$this->assertStringNotContainsString('>stale</a>', LineAuditPage::render(['view' => 'sharing', 'days' => 7], $rNow));
 		} finally {
 			DatabaseFactory::reset();
 		}
+	}
+
+	public function testRestreamersAreJudgedByTheirProgramsAndPlaces(): void {
+		$t = 2_000_000;
+		$from = $t - 86400;
+		$ua = static fn (string $u, int $f, int $l): array => ['ua' => $u, 'first_seen' => $f, 'last_seen' => $l];
+		$isp = static fn (string $i, int $f, int $l): array => ['isp' => $i, 'first_seen' => $f, 'last_seen' => $l];
+		$live = static fn (string $ip, string $i, string $u): array => ['ip' => $ip, 'isp' => $i, 'ua' => $u];
+
+		// One panel, one program (versions apart), one ISP, thirty connections: fine.
+		$ok = LineAuditAnalyzer::restreamer([$ua('Lavf/58.29.100', $t - 90 * 86400, $t - 2 * 86400), $ua('Lavf/60.3.100', $t - 86400 + 60, $t)], [$isp('Hetzner', $t - 90 * 86400, $t)],
+			array_fill(0, 30, $live('1.2.3.4', 'Hetzner', 'Lavf/60.3.100')), $from);
+		$this->assertSame(['ok', 0, 1], [$ok['level'], $ok['score'], $ok['ips_now']]);
+		$this->assertSame('ffmpeg / Lavf', LineAuditAnalyzer::uaKey('Lavf/60.3.100'));
+		$this->assertSame(LineAuditAnalyzer::uaKey('MyPanel/2.1 (x)'), LineAuditAnalyzer::uaKey('MyPanel/2.3 (x)'));
+
+		// The same line, now also watched in TiviMate from a home ISP: used elsewhere.
+		$bad = LineAuditAnalyzer::restreamer(
+			[$ua('Lavf/60.3.100', $t - 90 * 86400, $t), $ua('TiviMate/4.7.0 (Android 11)', $t - 3600, $t)],
+			[$isp('Hetzner', $t - 90 * 86400, $t), $isp('Vodafone Albania', $t - 3600, $t)],
+			[$live('1.2.3.4', 'Hetzner', 'Lavf/60.3.100'), $live('5.6.7.8', 'Vodafone Albania', 'TiviMate/4.7.0 (Android 11)')], $from);
+		$this->assertSame('likely', $bad['level']);
+		$why = implode('; ', $bad['reasons']);
+		$this->assertStringContainsString("a viewer's player on a restream line: TiviMate", $why);
+		$this->assertStringContainsString('2 different programs', $why);
+		$this->assertStringContainsString('pulled from 2 ISPs at once', $why);
+		$this->assertStringContainsString('an ISP it never used before: Vodafone Albania', $why);
+		$this->assertSame([false, true], array_column($bad['uas'], 'new'));
+
+		// A second panel program on a new ISP, not at once: worth a look.
+		$check = LineAuditAnalyzer::restreamer([$ua('Lavf/60.3.100', $t - 90 * 86400, $t - 7200), $ua('Go-http-client/1.1', $t - 3600, $t)],
+			[$isp('Hetzner', $t - 90 * 86400, $t - 7200), $isp('OVH', $t - 3600, $t)], [$live('9.9.9.9', 'OVH', 'Go-http-client/1.1')], $from);
+		$this->assertSame('likely', $check['level']);   // 2 programs + 2 ISPs + a new user agent + a new ISP
+		$this->assertSame('check', LineAuditAnalyzer::restreamer([$ua('Lavf/60', $t - 90 * 86400, $t)], [$isp('Hetzner', $t - 90 * 86400, $t), $isp('OVH', $t - 90 * 86400, $t - 3600)], [], $from)['level']);
 	}
 }

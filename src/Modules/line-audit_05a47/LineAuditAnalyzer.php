@@ -64,6 +64,109 @@ final class LineAuditAnalyzer {
 		return 'Other';
 	}
 
+	/**
+	 * One client program, whatever its version: the player family, or for an
+	 * unknown agent its text with the numbers taken out ("MyPanel/2.1" and
+	 * "MyPanel/2.3" are one program).
+	 */
+	public static function uaKey(string $rUserAgent): string {
+		$rFamily = self::playerFamily($rUserAgent);
+		if ($rFamily !== 'Other') {
+			return $rFamily;
+		}
+		return 'other:' . strtolower((string) preg_replace('~\d[\d._]*~', '#', mb_substr(trim($rUserAgent), 0, 60)));
+	}
+
+	/** Families a viewer watches with: on a restream line, a person is using it. */
+	public static function isPlayer(string $rFamily): bool {
+		return !in_array($rFamily, self::TOOLS, true) && $rFamily !== 'Other' && $rFamily !== '(none)';
+	}
+
+	/**
+	 * A restreamer line judged as one: another panel pulling channels, with one
+	 * program (one user agent), from one place. Handovers and several
+	 * connections are what it is for and count for nothing here. What does
+	 * count: a viewer's player on it (the line is watched by a person too),
+	 * a second program, pulls from two ISPs at once, and a user agent or an
+	 * ISP it never used before the window.
+	 *
+	 * @param list<array{ua:string, first_seen:int, last_seen:int}> $rUas every user agent the line has pulled with
+	 * @param list<array{isp:string, first_seen:int, last_seen:int}> $rIsps every ISP it has been used from
+	 * @param list<array{ip:string, isp:string, ua:string}> $rLive its connections now
+	 * @return array{score:int, level:string, reasons:list<string>, uas:list<array{ua:string, family:string, new:bool, now:bool}>, isps:list<array{isp:string, new:bool, now:bool}>, ips_now:int, isps_now:int}
+	 */
+	public static function restreamer(array $rUas, array $rIsps, array $rLive, int $rFrom): array {
+		$rNowUas = array_flip(array_map(static fn (array $c): string => trim((string) $c['ua']), $rLive));
+		$rNowIsps = array_flip(array_filter(array_map(static fn (array $c): string => trim((string) $c['isp']), $rLive)));
+		$rIpsNow = count(array_unique(array_filter(array_column($rLive, 'ip'))));
+		// A program counts as new only if no version of it was seen before the window.
+		$rOldKeys = [];
+		foreach ($rUas as $u) {
+			if ($u['first_seen'] < $rFrom) {
+				$rOldKeys[self::uaKey($u['ua'])] = true;
+			}
+		}
+		$rHadUa = $rOldKeys !== [];
+		$rHadIsp = (bool) array_filter($rIsps, static fn (array $i): bool => $i['first_seen'] < $rFrom);
+
+		$rUaRows = [];
+		$rKeys = [];
+		foreach ($rUas as $u) {
+			if ($u['last_seen'] < $rFrom && !isset($rNowUas[$u['ua']])) {
+				continue;
+			}
+			$rFamily = self::playerFamily($u['ua']);
+			$rKeys[self::uaKey($u['ua'])] = $rFamily;
+			$rUaRows[] = ['ua' => $u['ua'], 'family' => $rFamily, 'new' => $rHadUa && $u['first_seen'] >= $rFrom && !isset($rOldKeys[self::uaKey($u['ua'])]), 'now' => isset($rNowUas[$u['ua']])];
+		}
+		$rIspRows = [];
+		foreach ($rIsps as $i) {
+			if ($i['last_seen'] < $rFrom && !isset($rNowIsps[$i['isp']])) {
+				continue;
+			}
+			$rIspRows[] = ['isp' => $i['isp'], 'new' => $rHadIsp && $i['first_seen'] >= $rFrom, 'now' => isset($rNowIsps[$i['isp']])];
+		}
+
+		$rScore = 0;
+		$rWhy = [];
+		$rPlayers = array_values(array_unique(array_filter($rKeys, [self::class, 'isPlayer'])));
+		if ($rPlayers !== []) {
+			$rScore += 3;
+			$rWhy[] = 'a viewer\'s player on a restream line: ' . implode(', ', $rPlayers);
+		}
+		if (count($rKeys) >= 2) {
+			$rScore += 2;
+			$rWhy[] = count($rKeys) . ' different programs (a restream panel pulls with one)';
+		}
+		if (count($rNowIsps) >= 2) {
+			$rScore += 2;
+			$rWhy[] = 'pulled from ' . count($rNowIsps) . ' ISPs at once';
+		} elseif (count($rIspRows) >= 2) {
+			$rScore += 1;
+			$rWhy[] = count($rIspRows) . ' ISPs in the window';
+		}
+		$rNewUa = array_values(array_filter($rUaRows, static fn (array $u): bool => $u['new']));
+		if ($rNewUa !== []) {
+			$rScore += 1;
+			$rWhy[] = 'a user agent it never used before: ' . self::uaKeyLabel($rNewUa[0]['ua']);
+		}
+		$rNewIsp = array_values(array_filter($rIspRows, static fn (array $i): bool => $i['new']));
+		if ($rNewIsp !== []) {
+			$rScore += 1;
+			$rWhy[] = 'an ISP it never used before: ' . $rNewIsp[0]['isp'];
+		}
+		return [
+			'score' => $rScore, 'level' => $rScore >= 3 ? 'likely' : ($rScore >= 1 ? 'check' : 'ok'), 'reasons' => $rWhy,
+			'uas' => $rUaRows, 'isps' => $rIspRows, 'ips_now' => $rIpsNow, 'isps_now' => count($rNowIsps),
+		];
+	}
+
+	/** A user agent for a sentence: its family, or its first 40 characters. */
+	public static function uaKeyLabel(string $rUserAgent): string {
+		$rFamily = self::playerFamily($rUserAgent);
+		return $rFamily !== 'Other' ? $rFamily : '"' . mb_strimwidth(trim($rUserAgent), 0, 40, '…') . '"';
+	}
+
 	/** Samples are taken every five minutes: a sample stands for that long. */
 	public const SAMPLE_SEC = 300;
 

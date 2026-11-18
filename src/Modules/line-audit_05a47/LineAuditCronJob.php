@@ -45,6 +45,7 @@ class LineAuditCronJob implements CommandInterface {
 		LineAuditRepository::saveSamples($rSamples);
 		LineAuditRepository::pruneSamples($rNow);
 		LineAuditRepository::recordIsps($rNow, $rNow - 900, $rConnections);
+		LineAuditRepository::recordUas($rNow, $rNow - 900, $rConnections);
 		return count($rSamples);
 	}
 }

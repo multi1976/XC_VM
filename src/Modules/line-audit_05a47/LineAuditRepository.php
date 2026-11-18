@@ -200,6 +200,81 @@ final class LineAuditRepository {
 		return count($rRows);
 	}
 
+	/** @return list<int> ids of the restreamer lines */
+	public static function restreamers(): array {
+		return array_map('intval', self::db()->fetchColumn('SELECT `id` FROM `lines` WHERE `is_restreamer` = 1') ?: []);
+	}
+
+	/**
+	 * Remember the user agents restreamer lines pull with: those of their
+	 * sessions that ended since $rSince and of their connections live now (a
+	 * restream connection can stay open for weeks, so the live ones count
+	 * most). The first run reads the whole activity log.
+	 *
+	 * @param list<array{user_id:int, ua:string, date_start:int}> $rLive
+	 * @return int rows written
+	 */
+	public static function recordUas(int $rNow, int $rSince, array $rLive): int {
+		$rIDs = array_flip(self::restreamers());
+		if ($rIDs === []) {
+			return 0;
+		}
+		$rRows = [];
+		$rAdd = static function (int $rUser, string $rUa, int $rFirst, int $rLast) use (&$rRows, $rIDs): void {
+			$rUa = mb_substr(trim(self::raw($rUa)), 0, 255);
+			if (!isset($rIDs[$rUser])) {
+				return;
+			}
+			$rKey = $rUser . ':' . md5($rUa);
+			$rFirst = $rFirst > 0 ? $rFirst : $rLast;
+			$rRows[$rKey] = isset($rRows[$rKey])
+				? [$rUser, $rRows[$rKey][1], $rUa, min($rRows[$rKey][3], $rFirst), max($rRows[$rKey][4], $rLast)]
+				: [$rUser, md5($rUa), $rUa, $rFirst, $rLast];
+		};
+		$rEmpty = (int) self::db()->fetchValue('SELECT COUNT(*) FROM `line_audit_uas`') === 0;
+		foreach (array_chunk(array_keys($rIDs), 1000) as $rChunk) {
+			$rSessions = self::db()->fetchAll(
+				'SELECT `user_id`, `user_agent`, MIN(`date_start`) AS `f`, MAX(COALESCE(`date_end`, `date_start`)) AS `l` FROM `lines_activity` WHERE `user_id` IN (' . implode(',', $rChunk) . ')'
+				. ($rEmpty ? '' : ' AND `date_end` >= ' . (int) $rSince) . ' GROUP BY `user_id`, `user_agent`'
+			) ?: [];
+			foreach ($rSessions as $r) {
+				$rAdd((int) $r['user_id'], (string) $r['user_agent'], (int) $r['f'], (int) $r['l']);
+			}
+		}
+		foreach ($rLive as $c) {
+			$rAdd((int) $c['user_id'], (string) ($c['ua'] ?? ''), (int) ($c['date_start'] ?? 0), $rNow);
+		}
+		foreach (array_chunk(array_values($rRows), 500) as $rChunk) {
+			self::db()->query(
+				'INSERT INTO `line_audit_uas` (`user_id`, `ua_hash`, `ua`, `first_seen`, `last_seen`) VALUES ' . implode(',', array_fill(0, count($rChunk), '(?, ?, ?, ?, ?)'))
+				. ' ON DUPLICATE KEY UPDATE `first_seen` = LEAST(`first_seen`, VALUES(`first_seen`)), `last_seen` = GREATEST(`last_seen`, VALUES(`last_seen`))',
+				...array_merge(...$rChunk)
+			);
+		}
+		self::db()->query('DELETE u FROM `line_audit_uas` u LEFT JOIN `lines` l ON l.`id` = u.`user_id` WHERE l.`id` IS NULL OR l.`is_restreamer` = 0');
+		return count($rRows);
+	}
+
+	/**
+	 * The user agents and ISPs ever seen for these lines.
+	 *
+	 * @param list<int> $rIDs
+	 * @return array{uas: array<int, list<array{ua:string, first_seen:int, last_seen:int}>>, isps: array<int, list<array{isp:string, first_seen:int, last_seen:int}>>}
+	 */
+	public static function restreamHistory(array $rIDs): array {
+		$rOut = ['uas' => [], 'isps' => []];
+		foreach (array_chunk(array_values(array_unique(array_map('intval', $rIDs))), 1000) as $rChunk) {
+			$rIn = implode(',', $rChunk);
+			foreach (self::db()->fetchAll('SELECT `user_id`, `ua`, `first_seen`, `last_seen` FROM `line_audit_uas` WHERE `user_id` IN (' . $rIn . ') ORDER BY `first_seen`') ?: [] as $r) {
+				$rOut['uas'][(int) $r['user_id']][] = ['ua' => self::raw((string) $r['ua']), 'first_seen' => (int) $r['first_seen'], 'last_seen' => (int) $r['last_seen']];
+			}
+			foreach (self::db()->fetchAll('SELECT `user_id`, `isp`, `first_seen`, `last_seen` FROM `line_audit_isps` WHERE `user_id` IN (' . $rIn . ') ORDER BY `first_seen`') ?: [] as $r) {
+				$rOut['isps'][(int) $r['user_id']][] = ['isp' => self::raw((string) $r['isp']), 'first_seen' => (int) $r['first_seen'], 'last_seen' => (int) $r['last_seen']];
+			}
+		}
+		return $rOut;
+	}
+
 	/**
 	 * The ISPs of every line that started using a new one since $rFrom.
 	 *
