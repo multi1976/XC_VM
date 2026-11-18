@@ -115,7 +115,7 @@ final class LineAuditPage {
 			. '<button class="btn btn-sm btn-primary" type="submit">Apply</button>'
 			. '<small class="text-muted ms-2">' . count($rScope) . ' lines · ' . array_sum(array_intersect_key($rLive, $rScope)) . ' connections now</small></form>';
 
-		$rCtx = ['last_session' => $rLastSession, 'handovers' => $rHandovers, 'players' => $rPlayers, 'lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
+		$rCtx = ['orphans' => LineAuditRepository::orphanDeviceLines(), 'last_session' => $rLastSession, 'handovers' => $rHandovers, 'players' => $rPlayers, 'lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
 		return $rHtml . match ($rView) {
 			'sharing'  => self::sharingTab($rSharing, $rCtx),
 			'restreamers' => self::restreamTab($rRestream, $rCtx),
@@ -158,6 +158,13 @@ final class LineAuditPage {
 		}
 		if (!self::enabled($l)) {
 			$rFlags .= ' <span class="badge bg-label-dark">disabled</span>';
+		}
+		if (isset($rCtx['orphans'][$rID])) {
+			// No device: the panel shows this line nowhere, and its line page sends it back to the dashboard.
+			$rFlags .= ' <span class="badge bg-label-danger" title="' . $h($rCtx['orphans'][$rID]) . ' line whose device was deleted: no page of the panel lists it, and opening it leads back to the dashboard">no ' . $h($rCtx['orphans'][$rID]) . ' device</span>';
+			return '<td>' . $h($l['username']) . $rFlags . '</td>'
+				. '<td><small>' . $h($rCtx['owners'][(int) $l['member_id']] ?? '–') . '</small></td>'
+				. '<td class="text-center">' . ((int) ($rCtx['live'][$rID] ?? 0)) . '<small class="text-muted">/' . ((int) $l['max_connections'] ?: '∞') . '</small></td>';
 		}
 		return '<td><a href="./line?id=' . $rID . '" target="_blank" rel="noopener">' . $h($l['username']) . '</a>' . $rFlags . '</td>'
 			. '<td><small>' . $h($rCtx['owners'][(int) $l['member_id']] ?? '–') . '</small></td>'
@@ -403,7 +410,8 @@ final class LineAuditPage {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rHtml = '<p class="text-muted small">Enabled, not expired, created over ' . self::UNUSED_DAYS . ' days ago, not connected now, and with no session for ' . self::UNUSED_DAYS . ' days or more, '
 			. 'neither in the line\'s own record nor in the activity log. Lines nobody seems to use: a customer who left, a test line, or a line set up and forgotten. '
-			. 'This page changes nothing: check a line (its activity, its owner) before disabling or deleting it from Manage Lines.</p>';
+			. 'This page changes nothing: check a line (its activity, its owner) before disabling or deleting it from Manage Lines. '
+			. 'A line marked <em>no MAG device</em> or <em>no Enigma2 device</em> is a device line whose device was deleted: the panel lists such lines only through their device, so it shows them nowhere.</p>';
 		if ($rUnused === []) {
 			return $rHtml . '<p class="text-muted mb-0">Nothing found.</p>';
 		}

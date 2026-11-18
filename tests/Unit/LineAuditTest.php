@@ -77,7 +77,7 @@ final class LineAuditTest extends TestCase {
 
 	public function testEachTabListsWhatItShould(): void {
 		$rDb = new TestDb();
-		foreach (['lines', 'lines_live', 'lines_activity', 'lines_logs', 'users', 'streams'] as $rTable) {
+		foreach (['lines', 'lines_live', 'lines_activity', 'lines_logs', 'users', 'streams', 'mag_devices', 'enigma2_devices'] as $rTable) {
 			$rDb->exec(InstallSchema::table($rTable));
 		}
 		foreach (array_filter(array_map('trim', explode(';', (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/line-audit_*')[0] . '/database.sql')))) as $rStatement) {
@@ -144,7 +144,7 @@ final class LineAuditTest extends TestCase {
 		$this->assertSame('likely', LineAuditAnalyzer::sharing(null, null, [], ['handovers' => 12, 'returns' => 11])['level']);
 
 		$rDb = new TestDb();
-		foreach (['lines', 'lines_live', 'lines_activity', 'lines_logs', 'users', 'streams'] as $rTable) {
+		foreach (['lines', 'lines_live', 'lines_activity', 'lines_logs', 'users', 'streams', 'mag_devices', 'enigma2_devices'] as $rTable) {
 			$rDb->exec(InstallSchema::table($rTable));
 		}
 		foreach (array_filter(array_map('trim', explode(';', (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/line-audit_*')[0] . '/database.sql')))) as $rStatement) {
@@ -188,7 +188,7 @@ final class LineAuditTest extends TestCase {
 		$this->assertSame('added', LineAuditAnalyzer::ispChange([['isp' => 'A', 'first_seen' => 900000, 'last_seen' => 1090000], ['isp' => 'B', 'first_seen' => 1000500, 'last_seen' => 1100000]], $rFrom)['kind']);
 
 		$rDb = new TestDb();
-		foreach (['lines', 'lines_live', 'lines_activity', 'lines_logs', 'users', 'streams'] as $rTable) {
+		foreach (['lines', 'lines_live', 'lines_activity', 'lines_logs', 'users', 'streams', 'mag_devices', 'enigma2_devices'] as $rTable) {
 			$rDb->exec(InstallSchema::table($rTable));
 		}
 		foreach (array_filter(array_map('trim', explode(';', (string) file_get_contents(glob(dirname(__DIR__, 2) . '/src/Modules/line-audit_*')[0] . '/database.sql')))) as $rStatement) {
@@ -222,6 +222,8 @@ final class LineAuditTest extends TestCase {
 			$rDb->query('UPDATE `lines` SET `last_activity` = 12345 WHERE `id` IN (2, 4)');
 			$rUnused = LineAuditPage::render(['view' => 'unused'], $rNow);
 			$this->assertStringContainsString('>gone</a>', $rUnused);
+			$this->assertStringContainsString('magbox <span class="badge bg-label-secondary">MAG</span>', $rUnused);   // no device: no link
+			$this->assertStringContainsString('no MAG device', $rUnused);
 			$this->assertStringNotContainsString('>stale</a>', $rUnused);
 			$this->assertStringNotContainsString('>mover</a>', $rUnused);
 			$this->assertStringNotContainsString('>busy</a>', $rUnused);

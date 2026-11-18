@@ -200,6 +200,25 @@ final class LineAuditRepository {
 		return count($rRows);
 	}
 
+	/**
+	 * MAG and Enigma2 lines whose device is gone. The panel lists those lines
+	 * only through their device (MAG Devices, Enigma2 Devices) and its line
+	 * page sends them to their device page, so without one they are shown
+	 * nowhere and their link leads back to the dashboard.
+	 *
+	 * @return array<int, string> line id => 'MAG' or 'Enigma2'
+	 */
+	public static function orphanDeviceLines(): array {
+		$rOut = [];
+		foreach (self::db()->fetchAll('SELECT l.`id` FROM `lines` l LEFT JOIN `mag_devices` m ON m.`user_id` = l.`id` WHERE l.`is_mag` = 1 AND m.`user_id` IS NULL') ?: [] as $r) {
+			$rOut[(int) $r['id']] = 'MAG';
+		}
+		foreach (self::db()->fetchAll('SELECT l.`id` FROM `lines` l LEFT JOIN `enigma2_devices` e ON e.`user_id` = l.`id` WHERE l.`is_e2` = 1 AND e.`user_id` IS NULL') ?: [] as $r) {
+			$rOut[(int) $r['id']] = 'Enigma2';
+		}
+		return $rOut;
+	}
+
 	/** @return list<int> ids of the restreamer lines */
 	public static function restreamers(): array {
 		return array_map('intval', self::db()->fetchColumn('SELECT `id` FROM `lines` WHERE `is_restreamer` = 1') ?: []);
