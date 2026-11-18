@@ -21,7 +21,6 @@ final class LineAuditPage {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rView = isset(self::TABS[$rQuery['view'] ?? '']) ? (string) $rQuery['view'] : 'overview';
 		$rDays = (int) ($rQuery['days'] ?? 1) === 7 ? 7 : 1;
-		$rCanDelete = (bool) ($rQuery['can_delete'] ?? false);
 		$rReseller = (int) ($rQuery['reseller'] ?? 0);
 		$rSearch = mb_substr(trim((string) ($rQuery['q'] ?? '')), 0, 64);
 		$rFrom = $rNow - $rDays * 86400;
@@ -66,8 +65,9 @@ final class LineAuditPage {
 		$rExpiring = array_filter($rScope, static fn (array $l): bool => (int) $l['exp_date'] > $rNow && (int) $l['exp_date'] <= $rNow + 7 * 86400 && self::enabled($l));
 		uasort($rExpiring, static fn (array $a, array $b): int => (int) $a['exp_date'] <=> (int) $b['exp_date']);
 		$rExpiredTrying = array_filter($rScope, static fn (array $l): bool => (int) $l['exp_date'] > 0 && (int) $l['exp_date'] <= $rNow && isset($rRefusals[(int) $l['id']]['USER_EXPIRED']));
-		$rUnused = array_filter($rScope, static fn (array $l): bool => self::unused($l, $rNow));
-		uasort($rUnused, static fn (array $a, array $b): int => (int) $a['last_activity'] <=> (int) $b['last_activity']);
+		$rLastSession = LineAuditRepository::lastSessions(array_keys($rScope));
+		$rUnused = array_filter($rScope, static fn (array $l): bool => self::unused($l, $rNow, $rLastSession[(int) $l['id']] ?? 0, isset($rLive[(int) $l['id']])));
+		uasort($rUnused, static fn (array $a, array $b): int => max((int) $a['last_activity'], $rLastSession[(int) $a['id']] ?? 0) <=> max((int) $b['last_activity'], $rLastSession[(int) $b['id']] ?? 0));
 		$rUnstable = array_filter($rScope, static fn (array $l): bool => LineAuditAnalyzer::unstable($rHistory[(int) $l['id']] ?? null));
 		uasort($rUnstable, static fn (array $a, array $b): int => ($rHistory[(int) $b['id']]['short'] ?? 0) <=> ($rHistory[(int) $a['id']]['short'] ?? 0));
 
@@ -103,7 +103,7 @@ final class LineAuditPage {
 			. '<button class="btn btn-sm btn-primary" type="submit">Apply</button>'
 			. '<small class="text-muted ms-2">' . count($rScope) . ' lines · ' . array_sum(array_intersect_key($rLive, $rScope)) . ' connections now</small></form>';
 
-		$rCtx = ['can_delete' => $rCanDelete, 'handovers' => $rHandovers, 'players' => $rPlayers, 'lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
+		$rCtx = ['handovers' => $rHandovers, 'players' => $rPlayers, 'lines' => $rLines, 'live' => $rLive, 'history' => $rHistory, 'samples' => $rSamples, 'refusals' => $rRefusals, 'owners' => $rOwners, 'now' => $rNow, 'days' => $rDays];
 		return $rHtml . match ($rView) {
 			'sharing'  => self::sharingTab($rSharing, $rCtx),
 			'limits'   => self::limitsTab($rLimits, $rCtx),
@@ -116,15 +116,17 @@ final class LineAuditPage {
 		};
 	}
 
-	/** Enabled, not expired, created over UNUSED_DAYS ago and not used for as long (or never). */
-	public static function unused(array $l, int $rNow): bool {
+	/**
+	 * Enabled, not expired, created over UNUSED_DAYS ago, not connected now,
+	 * and used neither by the line's own record (`last_activity`) nor by any
+	 * session in the activity log for as long. `last_activity` alone is not
+	 * enough: a panel can leave it behind while the line is watched, and
+	 * lines in use were listed here (and deleted from here) because of it.
+	 */
+	public static function unused(array $l, int $rNow, int $rLastSession = 0, bool $rLive = false): bool {
 		$rCut = $rNow - self::UNUSED_DAYS * 86400;
-		return self::enabled($l) && ((int) $l['exp_date'] === 0 || (int) $l['exp_date'] > $rNow) && (int) $l['last_activity'] < $rCut && (int) $l['created_at'] < $rCut;
-	}
-
-	/** A MAG or Enigma2 line is deleted with its device (MAG / Enigma2 devices), not here. */
-	public static function deletable(array $l): bool {
-		return (int) ($l['is_mag'] ?? 0) === 0 && (int) ($l['is_e2'] ?? 0) === 0;
+		return self::enabled($l) && !$rLive && ((int) $l['exp_date'] === 0 || (int) $l['exp_date'] > $rNow)
+			&& (int) $l['last_activity'] < $rCut && $rLastSession < $rCut && (int) $l['created_at'] < $rCut;
 	}
 
 	private static function enabled(array $l): bool {
@@ -336,53 +338,19 @@ final class LineAuditPage {
 
 	private static function unusedTab(array $rUnused, array $rCtx): string {
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
-		$rHtml = '<p class="text-muted small">Enabled, not expired, created over 30 days ago and not used for 30 days or more (never, or long ago). '
-			. 'Lines nobody uses: a customer who left, a test line, or a line set up and forgotten.</p>';
+		$rHtml = '<p class="text-muted small">Enabled, not expired, created over ' . self::UNUSED_DAYS . ' days ago, not connected now, and with no session for ' . self::UNUSED_DAYS . ' days or more, '
+			. 'neither in the line\'s own record nor in the activity log. Lines nobody seems to use: a customer who left, a test line, or a line set up and forgotten. '
+			. 'This page changes nothing: check a line (its activity, its owner) before disabling or deleting it from Manage Lines.</p>';
 		if ($rUnused === []) {
 			return $rHtml . '<p class="text-muted mb-0">Nothing found.</p>';
 		}
-		$rCanDelete = $rCtx['can_delete'] ?? false;
-		if ($rCanDelete) {
-			$rHtml .= '<div class="d-flex flex-wrap gap-2 align-items-center mb-2">'
-				. '<button type="button" class="btn btn-sm btn-danger" id="la-delete" disabled>Delete selected <span class="badge bg-white text-danger ms-1" id="la-delete-n">0</span></button>'
-				. '<small class="text-muted">A deleted line cannot be brought back; its history stays, without the line. MAG and Enigma2 lines are deleted from their devices page.</small></div>';
-		}
-		$rHtml .= '<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>'
-			. ($rCanDelete ? '<th><input type="checkbox" class="form-check-input" id="la-all" title="Select all shown"></th>' : '')
-			. '<th>Line</th><th>Owner</th><th class="text-center" title="Connections now / allowed">Now</th><th>Last used</th><th>Created</th><th>Expires</th></tr></thead><tbody>';
+		$rHtml .= self::head(['Last used', 'Created', 'Expires']);
 		foreach (array_slice($rUnused, 0, self::MAX_ROWS, true) as $l) {
-			$rHtml .= '<tr>' . ($rCanDelete ? '<td>' . (self::deletable($l) ? '<input type="checkbox" class="form-check-input la-pick" value="' . (int) $l['id'] . '">' : '') . '</td>' : '')
-				. self::lineCells($l, $rCtx) . '<td><small>' . self::ago((int) $l['last_activity'], $rCtx['now']) . '</small></td>'
+			$rHtml .= '<tr>' . self::lineCells($l, $rCtx) . '<td><small>' . self::ago((int) $l['last_activity'], $rCtx['now']) . '</small></td>'
 				. '<td><small>' . $h((int) $l['created_at'] > 0 ? date('Y-m-d', (int) $l['created_at']) : '–') . '</small></td>'
 				. '<td><small>' . $h((int) $l['exp_date'] > 0 ? date('Y-m-d', (int) $l['exp_date']) : 'never') . '</small></td></tr>';
 		}
-		return $rHtml . self::tail(count($rUnused)) . ($rCanDelete ? self::deleteScript() : '');
-	}
-
-	/** Select, confirm, delete through `api?action=line_audit_delete`, then reload. */
-	private static function deleteScript(): string {
-		return <<<'JS'
-<script>
-(function () {
-	var picks = function () { return Array.prototype.slice.call(document.querySelectorAll('.la-pick')); };
-	var btn = document.getElementById('la-delete'), n = document.getElementById('la-delete-n'), all = document.getElementById('la-all');
-	var chosen = function () { return picks().filter(function (c) { return c.checked; }).map(function (c) { return c.value; }); };
-	var sync = function () { var k = chosen().length; n.textContent = k; btn.disabled = k === 0; };
-	picks().forEach(function (c) { c.addEventListener('change', sync); });
-	if (all) { all.addEventListener('change', function () { picks().forEach(function (c) { c.checked = all.checked; }); sync(); }); }
-	btn.addEventListener('click', function () {
-		var ids = chosen();
-		if (!ids.length || !window.confirm('Delete ' + ids.length + ' line(s)? This cannot be undone.')) { return; }
-		btn.disabled = true;
-		jQuery.post('./api?action=line_audit_delete', { ids: JSON.stringify(ids) }, function (r) {
-			if (!r || r.result !== true) { window.alert((r && r.message) || 'The lines could not be deleted.'); btn.disabled = false; return; }
-			window.alert(r.deleted + ' line(s) deleted' + (r.skipped ? ', ' + r.skipped + ' left: no longer unused, or a MAG/Enigma2 line' : '') + '.');
-			window.location.reload();
-		}, 'json').fail(function () { window.alert('The request failed.'); btn.disabled = false; });
-	});
-})();
-</script>
-JS;
+		return $rHtml . self::tail(count($rUnused));
 	}
 
 	private static function unstableTab(array $rUnstable, array $rCtx): string {

@@ -21,12 +21,11 @@ class LineAuditModule extends BaseModule {
 	}
 
 	public function getVersion(): string {
-		return '0.4.0';
+		return '0.4.1';
 	}
 
 	public function registerRoutes(Router $router): void {
 		$router->get('line_audit', [LineAuditController::class, 'page'], ['permission' => static fn (): bool => Authorization::check('adv', 'users')]);
-		$router->api('line_audit_delete', [LineAuditController::class, 'delete']);
 	}
 
 	public function registerCommands(CommandRegistry $registry): void {

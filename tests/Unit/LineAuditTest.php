@@ -5,7 +5,6 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 use XcVm\Infrastructure\Database\DatabaseFactory;
 use XcVm\Module\LineAudit\LineAuditAnalyzer;
-use XcVm\Module\LineAudit\LineAuditController;
 use XcVm\Module\LineAudit\LineAuditCronJob;
 use XcVm\Module\LineAudit\LineAuditPage;
 use XcVm\Module\LineAudit\LineAuditRepository;
@@ -21,7 +20,7 @@ final class LineAuditTest extends TestCase {
 		if ($rDir === null) {
 			self::markTestSkipped('The line-audit module is not installed in this tree.');
 		}
-		foreach (['LineAuditRepository', 'LineAuditAnalyzer', 'LineAuditPage', 'LineAuditCronJob', 'LineAuditController'] as $rClass) {
+		foreach (['LineAuditRepository', 'LineAuditAnalyzer', 'LineAuditPage', 'LineAuditCronJob'] as $rClass) {
 			require_once $rDir . '/' . $rClass . '.php';
 		}
 	}
@@ -215,14 +214,16 @@ final class LineAuditTest extends TestCase {
 			$this->assertStringContainsString('Moved', $rIsp);
 			$this->assertStringContainsString('ISP One', $rIsp);
 
-			// Unused: the delete control only for whoever may edit lines, never on a MAG line.
-			$this->assertStringNotContainsString('la-delete', LineAuditPage::render(['view' => 'unused'], $rNow));
-			$rUnused = LineAuditPage::render(['view' => 'unused', 'can_delete' => true], $rNow);
-			$this->assertStringContainsString('id="la-delete"', $rUnused);
-			$this->assertStringContainsString('value="2"', $rUnused);
-			$this->assertStringNotContainsString('value="3"', $rUnused);
-			$this->assertSame([[2], 3], LineAuditController::deletable([2, 3, 4, 1], $rNow));   // MAG, used a minute ago, in use: left alone
-			$this->assertSame([[], 0], LineAuditController::deletable([], $rNow));
+			// Unused: a stale `last_activity` is not enough when the activity log has a recent session.
+			$rDb->query("INSERT INTO `lines` (`id`, `member_id`, `username`, `password`, `max_connections`, `exp_date`, `enabled`, `admin_enabled`, `last_activity`, `created_at`, `is_restreamer`, `is_mag`, `isp_desc`, `is_isplock`) VALUES (5, 0, 'stale', 'x', 10, NULL, 1, 1, ?, ?, 1, 0, '', 0)", $rOld, $rOld);
+			$rDb->query("INSERT INTO `lines_activity` (`user_id`, `stream_id`, `server_id`, `user_ip`, `isp`, `user_agent`, `date_start`, `date_end`) VALUES (5, 1, 1, '10.0.0.9', 'ISP', 'VLC', ?, ?)", $rNow - 3 * 86400, $rNow - 3 * 86400 + 600);
+			$rUnused = LineAuditPage::render(['view' => 'unused'], $rNow);
+			$this->assertStringContainsString('>gone</a>', $rUnused);
+			$this->assertStringNotContainsString('>stale</a>', $rUnused);
+			$this->assertStringNotContainsString('>mover</a>', $rUnused);
+			$this->assertStringNotContainsString('>busy</a>', $rUnused);
+			$this->assertStringNotContainsString('checkbox', $rUnused);                                          // nothing to delete from here
+			$this->assertStringNotContainsString('line_audit_delete', $rUnused);
 		} finally {
 			DatabaseFactory::reset();
 		}

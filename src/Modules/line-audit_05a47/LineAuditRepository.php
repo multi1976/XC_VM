@@ -69,6 +69,22 @@ final class LineAuditRepository {
 		return $rOut;
 	}
 
+	/**
+	 * When each line's last session in the activity log ended.
+	 *
+	 * @param list<int> $rIDs
+	 * @return array<int, int> line id => unix time
+	 */
+	public static function lastSessions(array $rIDs): array {
+		$rOut = [];
+		foreach (array_chunk(array_values(array_unique(array_map('intval', $rIDs))), 1000) as $rChunk) {
+			foreach (self::db()->fetchAll('SELECT `user_id`, MAX(COALESCE(`date_end`, `date_start`)) AS `last` FROM `lines_activity` WHERE `user_id` IN (' . implode(',', $rChunk) . ') GROUP BY `user_id`') ?: [] as $r) {
+				$rOut[(int) $r['user_id']] = (int) $r['last'];
+			}
+		}
+		return $rOut;
+	}
+
 	/** @return array<int, string> user id => username, for the resellers (owners) of lines */
 	public static function owners(array $rIDs): array {
 		$rIDs = array_values(array_filter(array_unique(array_map('intval', $rIDs))));
