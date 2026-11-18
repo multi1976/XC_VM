@@ -161,6 +161,91 @@ final class LineAuditAnalyzer {
 		];
 	}
 
+	/** Words in an ISP's name that mark a datacenter or a host, not a home connection. */
+	public const HOSTING = ['hetzner', 'ovh', 'digitalocean', 'digital ocean', 'amazon', 'aws', 'google cloud', 'google llc', 'microsoft', 'azure', 'linode', 'akamai', 'vultr', 'choopa',
+		'contabo', 'leaseweb', 'scaleway', 'online s.a.s', 'hostinger', 'hostwinds', 'm247', 'datacamp', 'cdn77', 'oracle', 'alibaba', 'tencent', 'colocation', 'colo ', 'hosting',
+		'datacenter', 'data center', 'data centre', 'server', 'vps', 'cloud', 'ionos', '1&1', 'godaddy', 'serverius', 'worldstream', 'clouvider', 'psychz', 'quadranet', 'zenlayer'];
+
+	/** Does an ISP name look like a datacenter? */
+	public static function isHosting(string $rIsp): bool {
+		$rIsp = ' ' . strtolower($rIsp) . ' ';
+		foreach (self::HOSTING as $rWord) {
+			if (str_contains($rIsp, $rWord)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A MAG or Enigma2 line judged as a box: one channel at a time, from a
+	 * home connection, with the box's own user agent. A proxy that takes a box
+	 * line to restream the list shows otherwise: a datacenter, several
+	 * channels at once, channels opened one after another faster than a person
+	 * zaps, a user agent that is not the box's, or two places at once.
+	 *
+	 * @param string $rKind 'MAG' or 'Enigma2'
+	 * @param array{sessions:int, short:int, channels:int, max_hour:int, uas: array<string, int>, isps: array<string, int>}|null $rActivity
+	 * @param array<string, mixed>|null $rSamples sampleStats() of the line
+	 * @param list<array{ip:string, isp:string, ua:string}> $rLive
+	 * @return array{score:int, level:string, reasons:list<string>, at_once:int, families: array<string, int>, isps: list<array{isp:string, hosting:bool, now:bool}>}
+	 */
+	public static function deviceLine(string $rKind, ?array $rActivity, ?array $rSamples, array $rLive): array {
+		$rScore = 0;
+		$rWhy = [];
+		$rIsps = [];
+		foreach (array_keys($rActivity['isps'] ?? []) as $rIsp) {
+			$rIsps[$rIsp] = ['isp' => $rIsp, 'hosting' => self::isHosting($rIsp), 'now' => false];
+		}
+		foreach ($rLive as $c) {
+			$rIsp = trim((string) $c['isp']);
+			if ($rIsp !== '') {
+				$rIsps[$rIsp] = ['isp' => $rIsp, 'hosting' => self::isHosting($rIsp), 'now' => true];
+			}
+		}
+		$rHosting = array_values(array_filter($rIsps, static fn (array $i): bool => $i['hosting']));
+		if ($rHosting !== []) {
+			$rScore += 3;
+			$rWhy[] = 'from a datacenter, not a home: ' . $rHosting[0]['isp'];
+		}
+		$rAtOnce = max(count($rLive), (int) ($rSamples['max_conns'] ?? 0));
+		if ($rAtOnce >= 2) {
+			$rScore += 3;
+			$rWhy[] = $rAtOnce . ' channels at once (a box plays one)';
+		}
+		if (($rActivity['max_hour'] ?? 0) >= self::DEVICE_CHANNELS_HOUR) {
+			$rScore += 2;
+			$rWhy[] = $rActivity['max_hour'] . ' different channels in one hour (one after another, faster than a person zaps)';
+		}
+		$rFamilies = [];
+		foreach ($rActivity['uas'] ?? [] as $rUa => $n) {
+			$rFamily = self::playerFamily((string) $rUa);
+			$rFamilies[$rFamily] = ($rFamilies[$rFamily] ?? 0) + $n;
+		}
+		foreach ($rLive as $c) {
+			$rFamily = self::playerFamily((string) $c['ua']);
+			$rFamilies[$rFamily] = ($rFamilies[$rFamily] ?? 0) + 1;
+		}
+		$rOwn = $rKind === 'MAG' ? 'MAG box' : 'Enigma2';
+		$rForeign = array_keys(array_filter($rFamilies, static fn (int $n, string $f): bool => $f !== $rOwn && $f !== '(none)', ARRAY_FILTER_USE_BOTH));
+		if ($rForeign !== []) {
+			$rScore += 2;
+			$rWhy[] = 'a user agent that is not a ' . $rOwn . "'s: " . implode(', ', $rForeign);
+		}
+		if ((int) ($rSamples['multi_ip'] ?? 0) > 0 || count(array_unique(array_filter(array_column($rLive, 'ip')))) >= 2) {
+			$rScore += 2;
+			$rWhy[] = 'used from two IPs at once';
+		}
+		arsort($rFamilies);
+		return [
+			'score' => $rScore, 'level' => $rScore >= 3 ? 'likely' : ($rScore >= 1 ? 'check' : 'ok'), 'reasons' => $rWhy,
+			'at_once' => $rAtOnce, 'families' => $rFamilies, 'isps' => array_values($rIsps),
+		];
+	}
+
+	/** Channels in one hour above which a box line is opening them faster than a person zaps. */
+	public const DEVICE_CHANNELS_HOUR = 20;
+
 	/** A user agent for a sentence: its family, or its first 40 characters. */
 	public static function uaKeyLabel(string $rUserAgent): string {
 		$rFamily = self::playerFamily($rUserAgent);

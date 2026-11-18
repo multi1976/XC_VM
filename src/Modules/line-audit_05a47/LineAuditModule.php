@@ -21,7 +21,7 @@ class LineAuditModule extends BaseModule {
 	}
 
 	public function getVersion(): string {
-		return '0.5.1';
+		return '0.6.0';
 	}
 
 	public function registerRoutes(Router $router): void {

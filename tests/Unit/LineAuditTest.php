@@ -106,7 +106,7 @@ final class LineAuditTest extends TestCase {
 			}
 			$rDb->query("INSERT INTO `lines_logs` (`user_id`, `stream_id`, `client_status`, `ip`, `date`) VALUES (4, 1, 'USER_EXPIRED', '10.2.2.2', ?), (4, 1, 'USER_EXPIRED', '10.2.2.2', ?), (1, 1, 'COUNTRY_DISALLOW', '10.9.9.9', ?)", $rNow - 60, $rNow - 50, $rNow - 40);
 
-			$this->assertSame([1 => ['samples' => 2, 'multi_ip' => 2, 'multi_country' => 2, 'at_limit' => 2, 'max_ips' => 2, 'max_countries' => 2, 'max_uas' => 2, 'last_seen' => $rNow + 300, 'country_list' => 'AL,IT', 'isp_list' => 'ISP A | ISP B', 'ua_list' => 'IPTV Smarters, VLC']], LineAuditRepository::sampleStats($rNow - 86400));
+			$this->assertSame([1 => ['samples' => 2, 'multi_ip' => 2, 'multi_country' => 2, 'at_limit' => 2, 'max_ips' => 2, 'max_countries' => 2, 'max_uas' => 2, 'max_conns' => 2, 'last_seen' => $rNow + 300, 'country_list' => 'AL,IT', 'isp_list' => 'ISP A | ISP B', 'ua_list' => 'IPTV Smarters, VLC']], LineAuditRepository::sampleStats($rNow - 86400));
 			$this->assertSame([5 => ['VLC' => 25]], LineAuditRepository::players($rNow - 86400));
 
 			$rView = static fn (string $v, array $q = []): string => LineAuditPage::render(['view' => $v] + $q, $rNow + 300);
@@ -224,6 +224,9 @@ final class LineAuditTest extends TestCase {
 			$this->assertStringContainsString('>gone</a>', $rUnused);
 			$this->assertStringContainsString('magbox <span class="badge bg-label-secondary">MAG</span>', $rUnused);   // no device: no link
 			$this->assertStringContainsString('no MAG device', $rUnused);
+			$rBoxes = LineAuditPage::render(['view' => 'devices', 'days' => 7], $rNow);
+			$this->assertStringContainsString('magbox', $rBoxes);
+			$this->assertStringNotContainsString('magbox', LineAuditPage::render(['view' => 'sharing', 'days' => 7], $rNow));
 			$this->assertStringNotContainsString('>stale</a>', $rUnused);
 			$this->assertStringNotContainsString('>mover</a>', $rUnused);
 			$this->assertStringNotContainsString('>busy</a>', $rUnused);
@@ -274,5 +277,26 @@ final class LineAuditTest extends TestCase {
 			[$isp('Hetzner', $t - 90 * 86400, $t - 7200), $isp('OVH', $t - 3600, $t)], [$live('9.9.9.9', 'OVH', 'Go-http-client/1.1')], $from);
 		$this->assertSame('likely', $check['level']);   // 2 programs + 2 ISPs + a new user agent + a new ISP
 		$this->assertSame('check', LineAuditAnalyzer::restreamer([$ua('Lavf/60', $t - 90 * 86400, $t)], [$isp('Hetzner', $t - 90 * 86400, $t), $isp('OVH', $t - 90 * 86400, $t - 3600)], [], $from)['level']);
+	}
+
+	public function testBoxLinesUsedByAProxyAreTold(): void {
+		$this->assertTrue(LineAuditAnalyzer::isHosting('Hetzner Online GmbH'));
+		$this->assertTrue(LineAuditAnalyzer::isHosting('OVH SAS'));
+		$this->assertFalse(LineAuditAnalyzer::isHosting('Vodafone Albania'));
+		$this->assertFalse(LineAuditAnalyzer::isHosting('ALBtelecom'));
+
+		$home = ['sessions' => 40, 'short' => 6, 'channels' => 9, 'max_hour' => 6, 'uas' => ['Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3' => 40], 'isps' => ['ALBtelecom' => 40]];
+		$ok = LineAuditAnalyzer::deviceLine('MAG', $home, null, [['ip' => '1.1.1.1', 'isp' => 'ALBtelecom', 'ua' => 'MAG200 stbapp']]);
+		$this->assertSame(['ok', 1], [$ok['level'], $ok['at_once']]);
+
+		$proxy = ['sessions' => 900, 'short' => 700, 'channels' => 310, 'max_hour' => 140, 'uas' => ['MAG200 stbapp' => 850, 'Lavf/60.3.100' => 50], 'isps' => ['Hetzner Online GmbH' => 900]];
+		$bad = LineAuditAnalyzer::deviceLine('MAG', $proxy, ['multi_ip' => 0, 'max_conns' => 6], []);
+		$this->assertSame('likely', $bad['level']);
+		$why = implode('; ', $bad['reasons']);
+		$this->assertStringContainsString('from a datacenter, not a home: Hetzner Online GmbH', $why);
+		$this->assertStringContainsString('6 channels at once', $why);
+		$this->assertStringContainsString('140 different channels in one hour', $why);
+		$this->assertStringContainsString("a user agent that is not a MAG box's: ffmpeg / Lavf", $why);
+		$this->assertSame('check', LineAuditAnalyzer::deviceLine('Enigma2', ['sessions' => 30, 'short' => 2, 'channels' => 25, 'max_hour' => 22, 'uas' => ['Enigma2 HbbTV/1.1.1' => 30], 'isps' => ['ALBtelecom' => 30]], null, [])['level']);
 	}
 }

@@ -219,6 +219,37 @@ final class LineAuditRepository {
 		return $rOut;
 	}
 
+	/**
+	 * What MAG and Enigma2 lines did in the window, from their ended sessions:
+	 * sessions, short ones, channels, the most channels in any one hour, and
+	 * the user agents and ISPs they came with.
+	 *
+	 * @param list<int> $rIDs
+	 * @return array<int, array{sessions:int, short:int, channels:int, max_hour:int, uas: array<string, int>, isps: array<string, int>}>
+	 */
+	public static function deviceActivity(int $rFrom, array $rIDs): array {
+		$rOut = [];
+		foreach (array_chunk(array_values(array_unique(array_map('intval', $rIDs))), 1000) as $rChunk) {
+			$rIn = implode(',', $rChunk);
+			foreach (self::db()->fetchAll('SELECT `user_id`, COUNT(*) AS `sessions`, SUM(COALESCE(`date_end`, `date_start`) - `date_start` < 60) AS `short`, COUNT(DISTINCT `stream_id`) AS `channels` FROM `lines_activity` WHERE `date_start` >= ? AND `user_id` IN (' . $rIn . ') GROUP BY `user_id`', $rFrom) ?: [] as $r) {
+				$rOut[(int) $r['user_id']] = ['sessions' => (int) $r['sessions'], 'short' => (int) $r['short'], 'channels' => (int) $r['channels'], 'max_hour' => 0, 'uas' => [], 'isps' => []];
+			}
+			foreach (self::db()->fetchAll('SELECT `user_id`, MAX(`n`) AS `max_hour` FROM (SELECT `user_id`, `date_start` DIV 3600 AS `h`, COUNT(DISTINCT `stream_id`) AS `n` FROM `lines_activity` WHERE `date_start` >= ? AND `user_id` IN (' . $rIn . ') GROUP BY `user_id`, `h`) t GROUP BY `user_id`', $rFrom) ?: [] as $r) {
+				$rOut[(int) $r['user_id']]['max_hour'] = (int) $r['max_hour'];
+			}
+			foreach (self::db()->fetchAll('SELECT `user_id`, `user_agent`, `isp`, COUNT(*) AS `n` FROM `lines_activity` WHERE `date_start` >= ? AND `user_id` IN (' . $rIn . ') GROUP BY `user_id`, `user_agent`, `isp`', $rFrom) ?: [] as $r) {
+				$rID = (int) $r['user_id'];
+				$rUa = trim(self::raw((string) $r['user_agent']));
+				$rIsp = trim(self::raw((string) $r['isp']));
+				$rOut[$rID]['uas'][$rUa] = ($rOut[$rID]['uas'][$rUa] ?? 0) + (int) $r['n'];
+				if ($rIsp !== '') {
+					$rOut[$rID]['isps'][$rIsp] = ($rOut[$rID]['isps'][$rIsp] ?? 0) + (int) $r['n'];
+				}
+			}
+		}
+		return $rOut;
+	}
+
 	/** @return list<int> ids of the restreamer lines */
 	public static function restreamers(): array {
 		return array_map('intval', self::db()->fetchColumn('SELECT `id` FROM `lines` WHERE `is_restreamer` = 1') ?: []);
@@ -408,14 +439,14 @@ final class LineAuditRepository {
 		$rOut = [];
 		$rRows = self::db()->fetchAll(
 			'SELECT `user_id`, COUNT(*) AS `samples`, SUM(`ips` >= 2) AS `multi_ip`, SUM(`countries` >= 2) AS `multi_country`,
-			        SUM(`max_conn` > 0 AND `conns` >= `max_conn`) AS `at_limit`, MAX(`ips`) AS `max_ips`, MAX(`countries`) AS `max_countries`, MAX(`uas`) AS `max_uas`, MAX(`sampled_at`) AS `last_seen`
+			        SUM(`max_conn` > 0 AND `conns` >= `max_conn`) AS `at_limit`, MAX(`ips`) AS `max_ips`, MAX(`countries`) AS `max_countries`, MAX(`uas`) AS `max_uas`, MAX(`conns`) AS `max_conns`, MAX(`sampled_at`) AS `last_seen`
 			 FROM `line_audit_samples` WHERE `sampled_at` >= ? GROUP BY `user_id`',
 			$rFrom
 		) ?: [];
 		foreach ($rRows as $rRow) {
 			$rOut[(int) $rRow['user_id']] = [
 				'samples' => (int) $rRow['samples'], 'multi_ip' => (int) $rRow['multi_ip'], 'multi_country' => (int) $rRow['multi_country'], 'at_limit' => (int) $rRow['at_limit'],
-				'max_ips' => (int) $rRow['max_ips'], 'max_countries' => (int) $rRow['max_countries'], 'max_uas' => (int) $rRow['max_uas'], 'last_seen' => (int) $rRow['last_seen'],
+				'max_ips' => (int) $rRow['max_ips'], 'max_countries' => (int) $rRow['max_countries'], 'max_uas' => (int) $rRow['max_uas'], 'max_conns' => (int) $rRow['max_conns'], 'last_seen' => (int) $rRow['last_seen'],
 				'country_list' => '', 'isp_list' => '', 'ua_list' => '',
 			];
 		}

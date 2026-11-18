@@ -12,7 +12,7 @@ final class LineAuditPage {
 
 	private const MAX_ROWS = 500;
 	private const TABS = [
-		'overview' => 'Overview', 'sharing' => 'Shared accounts', 'restreamers' => 'Restreamers', 'limits' => 'Connection limits', 'refused' => 'Refused',
+		'overview' => 'Overview', 'sharing' => 'Shared accounts', 'restreamers' => 'Restreamers', 'devices' => 'MAG / Enigma2', 'limits' => 'Connection limits', 'refused' => 'Refused',
 		'isp' => 'ISP changes', 'expiry' => 'Expiring', 'unused' => 'Unused', 'unstable' => 'Unstable clients',
 	];
 
@@ -54,8 +54,17 @@ final class LineAuditPage {
 			$rRestream[$rID] = LineAuditAnalyzer::restreamer($rRestreamHistory['uas'][$rID] ?? [], $rRestreamHistory['isps'][$rID] ?? [], $rLiveConns[$rID] ?? [], $rFrom);
 		}
 		uasort($rRestream, static fn (array $a, array $b): int => $b['score'] <=> $a['score']);
+		// Box lines (MAG, Enigma2) judged as boxes: one channel at a time from a home.
+		$rDeviceLines = array_filter($rScope, static fn (array $l): bool => (int) $l['is_mag'] === 1 || (int) $l['is_e2'] === 1);
+		$rDeviceActivity = LineAuditRepository::deviceActivity($rFrom, array_keys($rDeviceLines));
+		$rDevices = [];
+		foreach ($rDeviceLines as $rID => $l) {
+			$rDevices[$rID] = LineAuditAnalyzer::deviceLine((int) $l['is_mag'] === 1 ? 'MAG' : 'Enigma2', $rDeviceActivity[$rID] ?? null, $rSamples[$rID] ?? null, $rLiveConns[$rID] ?? []);
+			$rDevices[$rID]['activity'] = $rDeviceActivity[$rID] ?? null;
+		}
+		uasort($rDevices, static fn (array $a, array $b): int => $b['score'] <=> $a['score']);
 		$rSharing = [];
-		foreach (array_filter($rScope, static fn (array $l): bool => !$rIsRestream($l)) as $rID => $l) {
+		foreach (array_filter($rScope, static fn (array $l): bool => !$rIsRestream($l) && !isset($rDeviceLines[(int) $l['id']])) as $rID => $l) {
 			$s = LineAuditAnalyzer::sharing($rSamples[$rID] ?? null, $rHistory[$rID] ?? null, $rPlayers[$rID] ?? [], $rHandovers[$rID] ?? null);
 			if ($s['level'] !== 'none') {
 				$rSharing[$rID] = $s;
@@ -93,7 +102,7 @@ final class LineAuditPage {
 		uasort($rIspChanges, static fn (array $a, array $b): int => [$a['kind'] === 'added' ? 0 : 1, -$a['since']] <=> [$b['kind'] === 'added' ? 0 : 1, -$b['since']]);
 
 		$rCounts = [
-			'sharing' => count($rSharing), 'restreamers' => count(array_filter($rRestream, static fn (array $r): bool => $r['level'] !== 'ok')), 'limits' => count($rLimits), 'refused' => count($rRefused), 'isp' => count($rIspChanges),
+			'sharing' => count($rSharing), 'restreamers' => count(array_filter($rRestream, static fn (array $r): bool => $r['level'] !== 'ok')), 'devices' => count(array_filter($rDevices, static fn (array $r): bool => $r['level'] !== 'ok')), 'limits' => count($rLimits), 'refused' => count($rRefused), 'isp' => count($rIspChanges),
 			'expiry' => count($rExpiring) + count($rExpiredTrying), 'unused' => count($rUnused), 'unstable' => count($rUnstable),
 		];
 		// Header: tabs, window, filters.
@@ -119,6 +128,7 @@ final class LineAuditPage {
 		return $rHtml . match ($rView) {
 			'sharing'  => self::sharingTab($rSharing, $rCtx),
 			'restreamers' => self::restreamTab($rRestream, $rCtx),
+			'devices'  => self::devicesTab($rDevices, $rCtx),
 			'limits'   => self::limitsTab($rLimits, $rCtx),
 			'refused'  => self::refusedTab($rRefused, $rCtx),
 			'isp'      => self::ispTab($rIspChanges, $rCtx),
@@ -190,6 +200,7 @@ final class LineAuditPage {
 		$rCards = [
 			['sharing', 'Shared accounts', $rLikely . ' likely · ' . ($rCounts['sharing'] - $rLikely) . ' to look at', 'Used from several countries or IPs at once, or from many in ' . self::window($rCtx) . '.'],
 			['restreamers', 'Restreamers', $rCounts['restreamers'] . ' to look at', 'Restream lines judged apart: a viewer\'s player on one, a second program, or pulls from two ISPs at once say it is used elsewhere too.'],
+			['devices', 'MAG / Enigma2', $rCounts['devices'] . ' to look at', 'Box lines judged as boxes: a datacenter, several channels at once, channels faster than a person zaps or another user agent say a proxy is restreaming through one.'],
 			['limits', 'At their limit', (string) $rCounts['limits'], 'Lines that use every connection they are allowed, now or in ' . self::window($rCtx) . ': more viewers than the line allows, or a limit set too low.'],
 			['refused', 'Refused', (string) $rCounts['refused'], 'Lines with refused attempts: expired, banned, wrong IP or country, not in bouquet…'],
 			['isp', 'ISP changes', (string) $rCounts['isp'], 'Lines that started coming from an ISP they never used before, in ' . self::window($rCtx) . ': a move, or a line passed on.'],
@@ -258,6 +269,43 @@ final class LineAuditPage {
 				. '<td class="text-center">' . $r['ips_now'] . '</td></tr>';
 		}
 		return $rHtml . self::tail(count($rRestream));
+	}
+
+	private static function devicesTab(array $rDevices, array $rCtx): string {
+		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
+		$rHtml = '<p class="text-muted small">MAG and Enigma2 lines. A box plays one channel at a time, from a home connection, with its own user agent; a proxy that takes a box line to restream the whole list does not: '
+			. 'it pulls <strong>from a datacenter</strong>, plays <strong>several channels at once</strong>, opens <strong>' . LineAuditAnalyzer::DEVICE_CHANNELS_HOUR . ' or more channels in one hour</strong> one after another, '
+			. 'comes with <strong>a user agent that is not the box\'s</strong>, or from <strong>two IPs at once</strong>. A datacenter is told by its ISP\'s name. '
+			. 'Traffic per line is not recorded by the panel, so it is not used here. Over ' . self::window($rCtx) . '.</p>';
+		if ($rDevices === []) {
+			return $rHtml . '<p class="text-muted mb-0">No MAG or Enigma2 line.</p>';
+		}
+		$rHtml .= self::head(['Verdict', 'Why', 'At once', 'Channels', 'ISPs', 'User agents']);
+		foreach (array_slice($rDevices, 0, self::MAX_ROWS, true) as $rID => $r) {
+			$l = $rCtx['lines'][$rID];
+			[$rLabel, $rClass, $rRow] = match ($r['level']) {
+				'likely' => ['Proxy likely', 'bg-label-danger', 'table-danger'],
+				'check'  => ['Check', 'bg-label-warning', 'table-warning'],
+				default  => ['OK', 'bg-label-success', ''],
+			};
+			$a = $r['activity'];
+			$rIsps = '';
+			foreach ($r['isps'] as $i) {
+				$rIsps .= '<div>' . $h($i['isp']) . ($i['hosting'] ? ' <span class="badge bg-label-danger">datacenter</span>' : '') . ($i['now'] ? ' <span class="badge bg-label-success">now</span>' : '') . '</div>';
+			}
+			$rUas = '';
+			foreach ($r['families'] as $rFamily => $n) {
+				$rUas .= '<div><span class="badge bg-label-secondary">' . $h($rFamily) . '</span> <small class="text-muted">×' . (int) $n . '</small></div>';
+			}
+			$rHtml .= '<tr class="' . $rRow . '">' . self::lineCells($l, $rCtx)
+				. '<td><span class="badge ' . $rClass . '">' . $rLabel . '</span></td>'
+				. '<td><small>' . ($r['reasons'] !== [] ? $h(implode('; ', $r['reasons'])) : '<span class="text-muted">behaves like one box</span>') . '</small></td>'
+				. '<td class="text-center">' . (int) $r['at_once'] . '</td>'
+				. '<td><small>' . ($a !== null ? (int) $a['channels'] . ' in ' . (int) $a['sessions'] . ' sessions<br><span class="text-muted">at most ' . (int) $a['max_hour'] . ' in an hour</span>' : '<span class="text-muted">no session</span>') . '</small></td>'
+				. '<td><small>' . ($rIsps !== '' ? $rIsps : '–') . '</small></td>'
+				. '<td><small>' . ($rUas !== '' ? $rUas : '–') . '</small></td></tr>';
+		}
+		return $rHtml . self::tail(count($rDevices));
 	}
 
 	private static function sharingTab(array $rSharing, array $rCtx): string {
