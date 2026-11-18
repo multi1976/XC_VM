@@ -284,17 +284,21 @@ final class SourceHealthTab {
 	 */
 	/** @param array<int, array<string, mixed>> $rRecent compute() over the last 24 h, keyed by source index */
 	private static function table(array $rRows, array $rRecent, array $rProfiles, int $rFrom, int $rNow, array $rAccounts = [], array $rAccountInfo = []): string {
-		$rOrder = SourceHealthCalculator::suggestedOrder($rRows);
-		$rByIndex = array_column($rRows, null, 'index');
-
-		// Compatibility groups, lettered from the best-scored source's group down.
-		$rGroups = [];
-		foreach ($rOrder as $rIndex) {
-			$rKey = (string) ($rProfiles[md5($rByIndex[$rIndex]['source'])]['fingerprint'] ?? '');
-			if ($rKey !== '' && !isset($rGroups[$rKey])) {
-				$rGroups[$rKey] = chr(ord('A') + min(25, count($rGroups)));
-			}
+		// Profiles: what each source showed on air, else what its latest probe read.
+		foreach ($rRows as &$rRow) {
+			$rOnAir = (string) ($rProfiles[md5($rRow['source'])]['label'] ?? '');
+			$rRow['profile'] = $rOnAir !== '' ? SourceHealthRepository::raw($rOnAir) : (string) ($rRow['probe']['label'] ?? '');
 		}
+		unset($rRow);
+		// The order auto-rank would propose: the best first (one of the main
+		// profile within a few points of it), then that profile's sources, then
+		// unknown, other profiles, and what Source Audit finds off.
+		$rAudit = SourceHealthRepository::auditState();
+		$rMain = AutoRank::mainProfile($rRows);
+		$rBest = AutoRank::best($rRows, $rAudit, $rMain) ?? $rRows[0];
+		$rOrder = AutoRank::proposedOrder($rRows, $rAudit, $rMain, (int) $rBest['index']);
+		$rByIndex = array_column($rRows, null, 'index');
+		$rGroups = AutoRank::letters($rRows, $rMain);
 
 		$h = static fn ($v): string => htmlspecialchars((string) $v, ENT_QUOTES);
 		$rHtml = '';
@@ -313,12 +317,12 @@ final class SourceHealthTab {
 
 		foreach ($rRows as $rRow) {
 			$rProfile = $rProfiles[md5($rRow['source'])] ?? null;
-			$rGroup = $rProfile !== null ? ($rGroups[(string) $rProfile['fingerprint']] ?? '') : '';
+			$rGroup = $rGroups[(string) $rRow['profile']] ?? '';
 			$rMtbf = $rRow['incidents'] > 0 ? self::duration(intdiv((int) $rRow['uptime_sec'], (int) $rRow['incidents'])) : ($rRow['uptime_sec'] > 0 ? '&gt; ' . self::duration((int) $rRow['uptime_sec']) : '–');
 			$rProfileText = $rProfile !== null
 				? '<span class="badge bg-label-secondary">' . $h($rGroup) . '</span> ' . $h(SourceHealthRepository::raw((string) $rProfile['label']))
 					. ((int) ($rProfile['bitrate'] ?? 0) > 0 ? ' · ' . round(((int) $rProfile['bitrate']) / 1000, 1) . ' Mbps' : '')
-				: (($rRow['probe']['label'] ?? '') !== '' ? $h($rRow['probe']['label']) . ' (from probes)' : 'not seen on air yet');
+				: (($rRow['probe']['label'] ?? '') !== '' ? ($rGroup !== '' ? '<span class="badge bg-label-secondary">' . $h($rGroup) . '</span> ' : '') . $h($rRow['probe']['label']) . ' (from probes)' : 'not seen on air yet');
 			$rHtml .= '<tr>'
 				. '<td>' . ((int) $rRow['index'] + 1) . ($rRow['running'] ? '<br><span class="badge bg-label-success" title="On air now">live</span>' : '') . '</td>'
 				. '<td><code title="' . $h(self::mask($rRow['source'])) . '">' . $h(self::mask($rRow['source'])) . '</code><br><small class="text-muted">' . $rProfileText . '</small>'
@@ -344,7 +348,8 @@ final class SourceHealthTab {
 		}
 		if (count($rGroups) > 1) {
 			$rHtml .= '<p class="text-muted mb-1">Sources in the same profile group (same letter) can replace each other with only a timestamp jump. '
-				. 'A switch between groups makes players re-initialise their decoder, which many set-top boxes handle badly.</p>';
+				. 'A switch between groups makes players re-initialise their decoder, which many set-top boxes handle badly. '
+				. 'A is the profile the stream is watched with most; the suggested order keeps it first and puts the sources of the first one\'s profile right behind it.</p>';
 		}
 		$rHtml .= '<p class="text-muted small mb-0">Score 0–100 = chance the source starts × chance it stays up (time between incidents; 6 h ≈ 63, 24 h ≈ 98) × quality issues per hour. '
 			. 'Failures less than ' . intdiv(SourceHealthCalculator::INCIDENT_GAP_SEC, 60) . ' minutes apart are one incident: a burst of retries during one outage counts once. '

@@ -18,11 +18,16 @@ use XcVm\Tests\Support\InstallSchema;
  */
 final class SourceAuditTest extends TestCase {
 	public static function setUpBeforeClass(): void {
+		// The core's status constants, as a panel boot defines them (the provider service returns them).
+		if (!defined('STATUS_SUCCESS')) {
+			require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+			\XC_Bootstrap::defineStatusConstants();
+		}
 		$rDir = glob(dirname(__DIR__, 2) . '/src/Modules/source-health_*')[0] ?? null;
 		if ($rDir === null) {
 			self::markTestSkipped('The source-health module is not installed in this tree.');
 		}
-		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceActions', 'StreamHealth', 'SourceAuditPage'] as $rClass) {
+		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceActions', 'SourceFinder', 'StreamHealth', 'SourceAuditPage', 'AutoRank', 'AutoProbe', 'SourceHealthCron'] as $rClass) {
 			require_once $rDir . '/' . $rClass . '.php';
 		}
 	}

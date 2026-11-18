@@ -52,6 +52,8 @@ final class AutoRank {
 	public const GOOD_RATE = 1.0;
 	/** Time on air a rate is computed over, at least: six failures in seven minutes are not 51 an hour, but neither are they fine. */
 	public const RATE_FLOOR_SEC = 900;
+	/** Points a source of the main profile may trail the best one by and still be preferred: a profile change makes players re-initialise. */
+	public const PROFILE_SLACK = 15.0;
 	public const OUTCOME_SEC = 86400;
 	public const KEEP_SEC = 30 * 86400;
 
@@ -98,7 +100,34 @@ final class AutoRank {
 			}
 		}
 		$rRunning = $rTo >= time() - 60 ? SourceHealthRepository::running($rStreamID) : [];
-		return SourceHealthCalculator::compute($rSources, $rEvents, $rFrom, $rTo, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rFrom, $rDrops));
+		$rRows = SourceHealthCalculator::compute($rSources, $rEvents, $rFrom, $rTo, $rRunning, SourceHealthRepository::probeStats($rStreamID, $rFrom, $rDrops));
+		$rProfiles = self::profiles($rStreamID);
+		foreach ($rRows as &$rRow) {
+			$rRow['profile'] = $rProfiles[md5(trim((string) $rRow['source']))] ?? '';
+		}
+		unset($rRow);
+		return $rRows;
+	}
+
+	/**
+	 * What each source of a stream looks like to a player, as a label (codec,
+	 * size, rate, scan, audio): from its time on air (source_health_profiles),
+	 * else from its latest probe that read one. Sources never on air nor probed
+	 * have none.
+	 *
+	 * @return array<string, string> md5(source) => profile label
+	 */
+	public static function profiles(int $rStreamID): array {
+		$rOut = [];
+		foreach (self::db()->fetchAll("SELECT `source_hash`, `label` FROM `source_health_probes` WHERE `stream_id` = ? AND `kind` = 'probe' AND `label` <> '' ORDER BY `checked_at` ASC", $rStreamID) ?: [] as $r) {
+			$rOut[(string) $r['source_hash']] = SourceHealthRepository::raw((string) $r['label']);
+		}
+		foreach (SourceHealthRepository::profiles($rStreamID) as $rHash => $r) {
+			if ((string) ($r['label'] ?? '') !== '') {
+				$rOut[(string) $rHash] = SourceHealthRepository::raw((string) $r['label']);   // what it showed on air wins
+			}
+		}
+		return $rOut;
 	}
 
 	/** Can this source be put first? Returns why not, or null. PURE. */
@@ -115,9 +144,114 @@ final class AutoRank {
 	}
 
 	/**
+	 * The profile the stream's viewers know: the one its sources have spent
+	 * the most time on air with over the window, else the first source's.
+	 * '' when no source's profile is known. PURE.
+	 *
+	 * @param list<array<string, mixed>> $rRows compute() rows with a 'profile' label ('' unknown)
+	 */
+	public static function mainProfile(array $rRows): string {
+		$rTime = [];
+		foreach ($rRows as $r) {
+			$rProfile = (string) ($r['profile'] ?? '');
+			if ($rProfile !== '') {
+				$rTime[$rProfile] = ($rTime[$rProfile] ?? 0) + (int) $r['uptime_sec'];
+			}
+		}
+		if ($rTime === []) {
+			return '';
+		}
+		arsort($rTime);
+		$rBest = (string) array_key_first($rTime);
+		return $rTime[$rBest] > 0 ? $rBest : (((string) ($rRows[0]['profile'] ?? '')) ?: $rBest);
+	}
+
+	/**
+	 * The best source to put first among $rRows (the first one included or
+	 * not): the eligible one ranking highest, but one of the main profile when
+	 * it ranks within PROFILE_SLACK of it, so the stream does not change profile
+	 * for a few points. PURE.
+	 *
+	 * @param list<array<string, mixed>> $rRows
+	 */
+	public static function best(array $rRows, array $rAudit, string $rMain): ?array {
+		$rAll = null;
+		$rSame = null;
+		foreach ($rRows as $r) {
+			if (self::ineligible($r, $rAudit) !== null) {
+				continue;
+			}
+			$v = SourceHealthCalculator::rankValue($r);
+			if ($rAll === null || $v > SourceHealthCalculator::rankValue($rAll)) {
+				$rAll = $r;
+			}
+			if ($rMain !== '' && ($r['profile'] ?? '') === $rMain && ($rSame === null || $v > SourceHealthCalculator::rankValue($rSame))) {
+				$rSame = $r;
+			}
+		}
+		if ($rSame !== null && SourceHealthCalculator::rankValue($rSame) >= SourceHealthCalculator::rankValue($rAll) - self::PROFILE_SLACK) {
+			return $rSame;
+		}
+		return $rAll;
+	}
+
+	/**
+	 * The failover order with $rTopIndex first: then the sources of the top's
+	 * profile (else the main one), best first, so a drop is caught by a source
+	 * players need not re-initialise for; then those whose profile is not known
+	 * yet; then the other profiles; and last the sources Source Audit finds dead
+	 * or down. Ties keep the operator's order. PURE.
+	 *
+	 * @param list<array<string, mixed>> $rRows
+	 * @return list<int> source indexes
+	 */
+	public static function proposedOrder(array $rRows, array $rAudit, string $rMain, int $rTopIndex): array {
+		$rByIndex = array_column($rRows, null, 'index');
+		$rGroup = (string) ($rByIndex[$rTopIndex]['profile'] ?? '') ?: $rMain;
+		$rRest = array_values(array_filter($rRows, static fn (array $r): bool => (int) $r['index'] !== $rTopIndex));
+		$rBucket = static function (array $r) use ($rAudit, $rGroup): int {
+			$rProfile = (string) ($r['profile'] ?? '');
+			return match (true) {
+				in_array((string) ($rAudit[md5(trim((string) $r['source']))]['status'] ?? ''), ['dead', 'down'], true) => 3,
+				$rGroup !== '' && $rProfile === $rGroup => 0,
+				$rProfile === '' => 1,
+				default => 2,
+			};
+		};
+		usort($rRest, static fn (array $a, array $b): int => [$rBucket($a), -SourceHealthCalculator::rankValue($a), (int) $a['index']]
+			<=> [$rBucket($b), -SourceHealthCalculator::rankValue($b), (int) $b['index']]);
+		return array_merge([$rTopIndex], array_map(static fn (array $r): int => (int) $r['index'], $rRest));
+	}
+
+	/**
+	 * Profile letters for a stream: A for the main profile, then B, C… in the
+	 * order the sources come. PURE.
+	 *
+	 * @param list<array<string, mixed>> $rRows
+	 * @return array<string, string> profile label => letter
+	 */
+	public static function letters(array $rRows, string $rMain): array {
+		$rOut = $rMain !== '' ? [$rMain => 'A'] : [];
+		foreach ($rRows as $r) {
+			$rProfile = (string) ($r['profile'] ?? '');
+			if ($rProfile !== '' && !isset($rOut[$rProfile])) {
+				$rOut[$rProfile] = chr(ord('A') + min(25, count($rOut)));
+			}
+		}
+		return $rOut;
+	}
+
+	/**
 	 * One evaluation of one stream. PURE.
 	 *
-	 * @param list<array<string, mixed>> $rRows SourceHealthCalculator::compute() output, operator's order
+	 * Two kinds of proposal. FIRST: another source should go first (see the
+	 * class comment), preferring one of the main profile within PROFILE_SLACK.
+	 * ORDER: the first stays, but the next in line, the one a drop falls back
+	 * on, is of another profile (or off by Source Audit) while a source of the
+	 * first one's profile could take its place: the drop would then be caught
+	 * without making players re-initialise.
+	 *
+	 * @param list<array<string, mixed>> $rRows SourceHealthCalculator::compute() output, operator's order, each with a 'profile' label ('' unknown)
 	 * @param array<string, array<string, mixed>> $rAudit Source Audit state by md5(source)
 	 * @param array<string, mixed>|null $rState the stream's row in source_health_rank_state
 	 * @return array{state: array{pending_hash:string, pending_count:int, pending_since:int, last_decision_at:int, last_top_hash:string}, decision: ?array<string, mixed>}
@@ -137,56 +271,75 @@ final class AutoRank {
 		if (count($rRows) < 2) {
 			return ['state' => $rClear($rState), 'decision' => null];
 		}
+		$rOff = static fn (array $r): bool => in_array((string) ($rAudit[md5(trim((string) $r['source']))]['status'] ?? ''), ['dead', 'down'], true);
 		$rFirst = $rRows[0];
-		$rFirstHash = md5(trim((string) $rFirst['source']));
-		$rFirstOff = in_array((string) ($rAudit[$rFirstHash]['status'] ?? ''), ['dead', 'down'], true);
 		$rFirstValue = SourceHealthCalculator::rankValue($rFirst);
+		$rMain = self::mainProfile($rRows);
+		$rLetters = self::letters($rRows, $rMain);
+		$rLetter = static fn (array $r): string => $rLetters[(string) ($r['profile'] ?? '')] ?? '?';
 
-		$rBest = null;
-		foreach (array_slice($rRows, 1) as $rRow) {
-			if (self::ineligible($rRow, $rAudit) === null && ($rBest === null || SourceHealthCalculator::rankValue($rRow) > SourceHealthCalculator::rankValue($rBest))) {
-				$rBest = $rRow;
+		$rKind = null;
+		$rBest = self::best(array_slice($rRows, 1), $rAudit, $rMain);
+		if ($rBest !== null && SourceHealthCalculator::rankValue($rBest) > $rFirstValue) {
+			// Never a worse source first, even in place of one that is off now.
+			$rBestValue = SourceHealthCalculator::rankValue($rBest);
+			if ($rOff($rFirst)) {
+				$rKind = 'first';
+				$rReason = 'the first source is ' . $rAudit[md5(trim((string) $rFirst['source']))]['status'] . ' by Source Audit';
+			} elseif ($rBestValue - $rFirstValue >= self::MARGIN) {
+				$rKind = 'first';
+				$rReason = 'ranks ' . (int) round($rBestValue) . ' against ' . ($rFirstValue < 0 ? 'nothing measured' : (int) round($rFirstValue)) . ' for the first';
 			}
 		}
-		if ($rBest === null) {
-			return ['state' => $rClear($rState), 'decision' => null];
+		$rTop = $rKind === 'first' ? $rBest : $rFirst;
+		$rOrder = self::proposedOrder($rRows, $rAudit, $rMain, (int) $rTop['index']);
+		$rByIndex = array_column($rRows, null, 'index');
+		if ($rKind === null) {
+			$rNow1 = $rRows[1];
+			$rNew1 = $rByIndex[$rOrder[1]];
+			$rGroup = (string) ($rFirst['profile'] ?? '') ?: $rMain;
+			if ((int) $rNew1['index'] !== (int) $rNow1['index'] && !$rOff($rNew1)) {
+				if ($rOff($rNow1)) {
+					$rKind = 'order';
+					$rReason = 'the next in line, #' . ($rNow1['index'] + 1) . ', is ' . $rAudit[md5(trim((string) $rNow1['source']))]['status'] . ' by Source Audit';
+				} elseif ($rGroup !== '' && ($rNow1['profile'] ?? '') !== '' && $rNow1['profile'] !== $rGroup && ($rNew1['profile'] ?? '') === $rGroup
+					&& SourceHealthCalculator::rankValue($rNew1) >= SourceHealthCalculator::rankValue($rNow1) - self::PROFILE_SLACK) {
+					$rKind = 'order';
+					$rReason = 'a drop would fall back on profile ' . $rLetter($rNow1) . ' (#' . ($rNow1['index'] + 1) . '); #' . ($rNew1['index'] + 1) . ' keeps profile ' . $rLetter($rNew1);
+				}
+			}
 		}
-		$rBestValue = SourceHealthCalculator::rankValue($rBest);
-		if ($rBestValue <= $rFirstValue) {
-			// Never a worse source first, even in place of one that is off now:
-			// a first source off by the audit that still ranks higher has worked
-			// better over the week than the one that would replace it.
-			return ['state' => $rClear($rState), 'decision' => null];
-		}
-		if ($rFirstOff) {
-			$rReason = 'the first source is ' . $rAudit[$rFirstHash]['status'] . ' by Source Audit';
-		} elseif ($rBestValue - $rFirstValue >= self::MARGIN) {
-			$rReason = 'ranks ' . (int) round($rBestValue) . ' against ' . ($rFirstValue < 0 ? 'nothing measured' : (int) round($rFirstValue)) . ' for the first';
-		} else {
+		if ($rKind === null) {
 			return ['state' => $rClear($rState), 'decision' => null];
 		}
 
-		$rHash = md5(trim((string) $rBest['source']));
-		if ($rState['pending_hash'] === $rHash) {
+		$rSignature = md5(implode(',', $rOrder));
+		if ($rState['pending_hash'] === $rSignature) {
 			$rState['pending_count']++;
 		} else {
-			$rState['pending_hash'] = $rHash;
+			$rState['pending_hash'] = $rSignature;
 			$rState['pending_count'] = 1;
 			$rState['pending_since'] = $rNow;
 		}
 		// Shadow mode leaves the order as it is: the same proposal would come back
-		// every interval. It is recorded once, until the first source or the
-		// proposal changes.
-		$rSame = $rState['last_top_hash'] === $rHash . ':' . $rFirstHash;
-		if ($rState['pending_count'] < self::CONFIRM || $rNow - $rState['last_decision_at'] < self::MIN_INTERVAL_SEC || $rSame) {
+		// every interval. It is recorded once, until it changes.
+		if ($rState['pending_count'] < self::CONFIRM || $rNow - $rState['last_decision_at'] < self::MIN_INTERVAL_SEC || $rState['last_top_hash'] === $rSignature) {
 			return ['state' => $rState, 'decision' => null];
 		}
 		$rState = $rClear($rState);
 		$rState['last_decision_at'] = $rNow;
-		$rState['last_top_hash'] = $rHash . ':' . $rFirstHash;
+		$rState['last_top_hash'] = $rSignature;
+		// FIRST compares the first source with the one proposed in its place;
+		// ORDER the next in line now with the one proposed instead.
+		[$rOld, $rNew] = $rKind === 'first' ? [$rFirst, $rTop] : [$rRows[1], $rByIndex[$rOrder[1]]];
 		return ['state' => $rState, 'decision' => [
-			'old_hash' => $rFirstHash, 'new_hash' => $rHash, 'old_index' => (int) $rFirst['index'], 'new_index' => (int) $rBest['index'],
-			'old_score' => $rFirst['score'], 'new_score' => $rBest['score'], 'old_value' => $rFirstValue, 'new_value' => $rBestValue,
+			'kind' => $rKind,
+			'old_hash' => md5(trim((string) $rOld['source'])), 'new_hash' => md5(trim((string) $rNew['source'])), 'old_index' => (int) $rOld['index'], 'new_index' => (int) $rNew['index'],
+			'old_score' => $rOld['score'], 'new_score' => $rNew['score'],
+			'old_value' => SourceHealthCalculator::rankValue($rOld), 'new_value' => SourceHealthCalculator::rankValue($rNew),
+			'old_profile' => $rLetter($rOld), 'new_profile' => $rLetter($rNew),
+			'order_before' => implode(',', array_map(static fn (array $r): int => (int) $r['index'] + 1, $rRows)),
+			'order_after' => implode(',', array_map(static fn (int $i): int => $i + 1, $rOrder)),
 			'reason' => $rReason, 'on_air' => (bool) $rFirst['running'],
 		]];
 	}
@@ -260,6 +413,10 @@ final class AutoRank {
 					$rByHash[md5(trim((string) $r['source']))] = $r;
 				}
 			}
+			[$rFailovers, $rSwitches] = $rSources === [] ? [null, null] : self::switches(
+				array_values(array_filter(SourceHealthRepository::events((int) $d['stream_id'], (int) $d['decided_at']), static fn (array $e): bool => (int) $e['date'] >= (int) $d['decided_at'] && (int) $e['date'] <= (int) $d['decided_at'] + self::OUTCOME_SEC)),
+				self::profiles((int) $d['stream_id'])
+			);
 			$rOld = $rByHash[$d['old_hash']] ?? null;
 			$rNew = $rByHash[$d['new_hash']] ?? null;
 			$rV = ($rOld === null || $rNew === null) ? 'gone' : self::verdict(
@@ -267,12 +424,46 @@ final class AutoRank {
 				['incidents' => (int) $rNew['incidents'], 'start_fails' => (int) $rNew['start_fails'], 'uptime' => (int) $rNew['uptime_sec'], 'probe_ok' => (int) ($rNew['probe_ok'] ?? 0), 'probe_total' => (int) ($rNew['probe_total'] ?? 0)]
 			);
 			self::db()->query(
-				'UPDATE `source_health_rank_decisions` SET `outcome_at` = ?, `old_incidents` = ?, `old_uptime` = ?, `old_start_fails` = ?, `new_incidents` = ?, `new_uptime` = ?, `new_start_fails` = ?, `new_probe_ok` = ?, `new_probe_total` = ?, `verdict` = ? WHERE `id` = ?',
-				$rNow, $rOld['incidents'] ?? null, $rOld['uptime_sec'] ?? null, $rOld['start_fails'] ?? null, $rNew['incidents'] ?? null, $rNew['uptime_sec'] ?? null, $rNew['start_fails'] ?? null, $rNew['probe_ok'] ?? null, $rNew['probe_total'] ?? null, $rV, (int) $d['id']
+				'UPDATE `source_health_rank_decisions` SET `outcome_at` = ?, `old_incidents` = ?, `old_uptime` = ?, `old_start_fails` = ?, `new_incidents` = ?, `new_uptime` = ?, `new_start_fails` = ?, `new_probe_ok` = ?, `new_probe_total` = ?, `failovers` = ?, `profile_switches` = ?, `verdict` = ? WHERE `id` = ?',
+				$rNow, $rOld['incidents'] ?? null, $rOld['uptime_sec'] ?? null, $rOld['start_fails'] ?? null, $rNew['incidents'] ?? null, $rNew['uptime_sec'] ?? null, $rNew['start_fails'] ?? null, $rNew['probe_ok'] ?? null, $rNew['probe_total'] ?? null,
+				$rFailovers, $rSwitches, $rV, (int) $d['id']
 			);
 			$rDone++;
 		}
 		return $rDone;
+	}
+
+	/**
+	 * Failovers in a run of events: a server's encoder moving from one source
+	 * to another, and how many of those changed profile (both known and
+	 * different), which is when players had to re-initialise. PURE.
+	 *
+	 * @param list<array{server_id:int|string, action:string, source:?string, date:int|string}> $rEvents oldest first
+	 * @param array<string, string> $rProfiles md5(source) => profile label
+	 * @return array{0:int, 1:int} [failovers, profile switches]
+	 */
+	public static function switches(array $rEvents, array $rProfiles): array {
+		$rLast = [];
+		$rFailovers = 0;
+		$rSwitches = 0;
+		foreach ($rEvents as $e) {
+			$rSource = trim((string) ($e['source'] ?? ''));
+			if ($rSource === '') {
+				continue;
+			}
+			$rServer = (string) $e['server_id'];
+			$rPrev = $rLast[$rServer] ?? null;
+			if ($rPrev !== null && $rPrev !== $rSource) {
+				$rFailovers++;
+				$a = $rProfiles[md5($rPrev)] ?? '';
+				$b = $rProfiles[md5($rSource)] ?? '';
+				if ($a !== '' && $b !== '' && $a !== $b) {
+					$rSwitches++;
+				}
+			}
+			$rLast[$rServer] = $rSource;
+		}
+		return [$rFailovers, $rSwitches];
 	}
 
 	private static function saveState(int $rStreamID, array $s, int $rNow): void {
@@ -286,8 +477,10 @@ final class AutoRank {
 
 	private static function record(int $rStreamID, array $d, int $rNow): void {
 		self::db()->query(
-			'INSERT INTO `source_health_rank_decisions` (`stream_id`, `decided_at`, `old_hash`, `new_hash`, `old_index`, `new_index`, `old_score`, `new_score`, `old_value`, `new_value`, `reason`, `on_air`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-			$rStreamID, $rNow, $d['old_hash'], $d['new_hash'], $d['old_index'], $d['new_index'], $d['old_score'], $d['new_score'], round($d['old_value'], 1), round($d['new_value'], 1), mb_substr($d['reason'], 0, 255), $d['on_air'] ? 1 : 0
+			'INSERT INTO `source_health_rank_decisions` (`stream_id`, `decided_at`, `kind`, `old_hash`, `new_hash`, `old_index`, `new_index`, `old_score`, `new_score`, `old_value`, `new_value`, `old_profile`, `new_profile`, `order_before`, `order_after`, `reason`, `on_air`) '
+			. 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+			$rStreamID, $rNow, $d['kind'], $d['old_hash'], $d['new_hash'], $d['old_index'], $d['new_index'], $d['old_score'], $d['new_score'], round($d['old_value'], 1), round($d['new_value'], 1),
+			$d['old_profile'], $d['new_profile'], mb_substr($d['order_before'], 0, 190), mb_substr($d['order_after'], 0, 190), mb_substr($d['reason'], 0, 255), $d['on_air'] ? 1 : 0
 		);
 	}
 

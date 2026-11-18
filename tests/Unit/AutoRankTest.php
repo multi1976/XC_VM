@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 use XcVm\Infrastructure\Database\DatabaseFactory;
+use XcVm\Module\SourceHealth\AutoProbe;
 use XcVm\Module\SourceHealth\AutoRank;
 use XcVm\Module\SourceHealth\SourceAuditPage;
 use XcVm\Module\SourceHealth\SourceHealthRepository;
@@ -24,13 +25,13 @@ final class AutoRankTest extends TestCase {
 		if ($rDir === null) {
 			self::markTestSkipped('The source-health module is not installed in this tree.');
 		}
-		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceActions', 'SourceFinder', 'StreamHealth', 'SourceAuditPage', 'AutoRank'] as $rClass) {
+		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceActions', 'SourceFinder', 'StreamHealth', 'SourceAuditPage', 'AutoRank', 'AutoProbe', 'SourceHealthCron'] as $rClass) {
 			require_once $rDir . '/' . $rClass . '.php';
 		}
 	}
 
-	private static function row(int $rIndex, string $rSource, ?int $rScore, string $rConfidence, int $rUptime = 7200, int $rProbeOk = 0): array {
-		return ['index' => $rIndex, 'source' => $rSource, 'score' => $rScore, 'confidence' => $rConfidence, 'uptime_sec' => $rUptime, 'probe_ok' => $rProbeOk, 'running' => $rIndex === 0];
+	private static function row(int $rIndex, string $rSource, ?int $rScore, string $rConfidence, int $rUptime = 7200, int $rProbeOk = 0, string $rProfile = ''): array {
+		return ['index' => $rIndex, 'source' => $rSource, 'score' => $rScore, 'confidence' => $rConfidence, 'uptime_sec' => $rUptime, 'probe_ok' => $rProbeOk, 'running' => $rIndex === 0, 'profile' => $rProfile];
 	}
 
 	public function testHysteresisAndWhatMayBePutFirst(): void {
@@ -130,5 +131,75 @@ final class AutoRankTest extends TestCase {
 		} finally {
 			DatabaseFactory::reset();
 		}
+	}
+
+	public function testProfileGroupsKeepFailoversInOneProfile(): void {
+		$t = 1_000_000;
+		$HD = 'h264 1920x1080 25i · mp2 48k 2ch';
+		$SD = 'h264 720x576 25i · aac 48k 2ch';
+		$S = static fn (int $i): string => 'http://s' . $i . '.example/live/u' . $i . '/p/1.ts';
+		// The stream is watched in HD (most time on air), whatever is first.
+		$rRows = [self::row(0, $S(0), 80, 'high', 90000, 0, $HD), self::row(1, $S(1), 85, 'high', 3600, 0, $SD), self::row(2, $S(2), 75, 'high', 7200, 0, $HD), self::row(3, $S(3), null, 'none', 0, 0, '')];
+		$this->assertSame($HD, AutoRank::mainProfile($rRows));
+		$this->assertSame([$HD => 'A', $SD => 'B'], AutoRank::letters($rRows, $HD));
+		// Order behind the first: its profile, then unknown, then other profiles.
+		$this->assertSame([0, 2, 3, 1], AutoRank::proposedOrder($rRows, [], $HD, 0));
+		$this->assertSame([0, 3, 1, 2], AutoRank::proposedOrder($rRows, [md5($S(2)) => ['status' => 'dead']], $HD, 0));   // off by the audit: last
+		// Within PROFILE_SLACK, the main profile goes first; beyond it, the better source does.
+		$this->assertSame(2, AutoRank::best(array_slice($rRows, 1), [], $HD)['index']);
+		$rFar = [self::row(1, $S(1), 99, 'high', 3600, 0, $SD), self::row(2, $S(2), 50, 'high', 7200, 0, $HD)];
+		$this->assertSame(1, AutoRank::best($rFar, [], $HD)['index']);
+
+		// The first is fine, but a drop would fall on SD: a NEXT IN LINE proposal, twice to confirm.
+		$r1 = AutoRank::decide($rRows, [], null, $t);
+		$r2 = AutoRank::decide($rRows, [], $r1['state'], $t + 1800);
+		$d = $r2['decision'];
+		$this->assertSame(['order', 1, 2, 'B', 'A', '1,2,3,4', '1,3,4,2'], [$d['kind'], $d['old_index'], $d['new_index'], $d['old_profile'], $d['new_profile'], $d['order_before'], $d['order_after']]);
+		$this->assertSame('a drop would fall back on profile B (#2); #3 keeps profile A', $d['reason']);
+		// Already in profile order: nothing to propose.
+		$rGood = [$rRows[0], $rRows[2], $rRows[3], $rRows[1]];
+		foreach ($rGood as $k => &$r) {
+			$r['index'] = $k;
+		}
+		unset($r);
+		$this->assertSame(0, AutoRank::decide($rGood, [], null, $t)['state']['pending_count']);
+
+		// A FIRST proposal prefers the main profile: an SD source 9 points ahead does not take the place of an HD one.
+		$rFirst = [self::row(0, $S(0), 10, 'high', 90000, 0, $HD), self::row(1, $S(1), 90, 'high', 3600, 0, $SD), self::row(2, $S(2), 81, 'high', 7200, 0, $HD)];
+		$d = AutoRank::decide($rFirst, [], AutoRank::decide($rFirst, [], null, $t)['state'], $t + 1800)['decision'];
+		$this->assertSame(['first', 2, 'A', '3,1,2'], [$d['kind'], $d['new_index'], $d['new_profile'], $d['order_after']]);
+
+		// Failovers of a day, and those that changed profile.
+		$rEvents = [
+			['server_id' => 1, 'action' => 'STREAM_START', 'source' => $S(0), 'date' => 1], ['server_id' => 1, 'action' => 'STREAM_FAILED', 'source' => $S(0), 'date' => 2],
+			['server_id' => 1, 'action' => 'STREAM_START', 'source' => $S(1), 'date' => 3], ['server_id' => 1, 'action' => 'STREAM_START', 'source' => $S(2), 'date' => 4],
+			['server_id' => 2, 'action' => 'STREAM_START', 'source' => $S(2), 'date' => 5], ['server_id' => 1, 'action' => 'STREAM_START', 'source' => $S(3), 'date' => 6],
+		];
+		$this->assertSame([3, 2], AutoRank::switches($rEvents, [md5($S(0)) => $HD, md5($S(1)) => $SD, md5($S(2)) => $HD]));   // 0→1 and 1→2 change profile, 2→3 unknown
+	}
+
+	public function testAutoProbesSpareTheSourceOnAirAndBusyAccounts(): void {
+		$t = 2_000_000;
+		$c = static fn (string $src, string $why, int $last = 0, int $id = 1): array => ['stream_id' => $id, 'source' => $src, 'why' => $why, 'every' => $why === 'proposed' ? AutoProbe::PROPOSED_EVERY_SEC : AutoProbe::PROFILE_EVERY_SEC, 'last' => $last];
+		$rOnAir = ['http://live.example/live/a/b/1.ts'];
+		$rBusyBackup = 'http://live.example/live/a/b/2.ts';                         // same account as the one on air
+		$rCands = [
+			$c('http://live.example/live/a/b/1.ts', 'profile'),                       // on air: never
+			$c($rBusyBackup, 'profile'),
+			$c('http://x.example/live/c/d/1.ts', 'profile', $t - 3600),             // probed an hour ago: not due
+			$c('http://y.example/live/e/f/1.ts', 'profile'),
+			$c('http://y.example/live/e/f/2.ts', 'profile'),                         // one per account per run
+			$c('http://z.example/live/g/h/1.ts', 'proposed', $t - 3 * 3600),
+			$c('http://dead.example/live/i/j/1.ts', 'proposed'),
+			$c('udp://239.0.0.1:1234', 'profile'),
+		];
+		$rAudit = [md5('http://dead.example/live/i/j/1.ts') => ['status' => 'dead']];
+		$rPlan = AutoProbe::plan($rCands, $rOnAir, [], $rAudit, $t);
+		$this->assertSame(['http://z.example/live/g/h/1.ts', 'http://y.example/live/e/f/1.ts'], array_column($rPlan, 'source'));   // proposed first
+		// A busy account only with fresh word that a connection is free.
+		$rKey = md5((string) \XcVm\Module\SourceHealth\SourceProber::accountKey($rBusyBackup));
+		$rFree = [$rKey => ['api' => true, 'max' => 10, 'active' => 2, 'checked_at' => $t - 60]];
+		$this->assertContains($rBusyBackup, array_column(AutoProbe::plan($rCands, $rOnAir, $rFree, $rAudit, $t, 10), 'source'));
+		$this->assertNotContains($rBusyBackup, array_column(AutoProbe::plan($rCands, $rOnAir, [$rKey => ['api' => true, 'max' => 2, 'active' => 2, 'checked_at' => $t - 60]], $rAudit, $t, 10), 'source'));
 	}
 }

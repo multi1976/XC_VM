@@ -27,7 +27,7 @@ final class SourceActionsTest extends TestCase {
 		if ($rDir === null) {
 			self::markTestSkipped('The source-health module is not installed in this tree.');
 		}
-		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceActions', 'SourceFinder', 'StreamHealth', 'SourceAuditPage'] as $rClass) {
+		foreach (['SourceFingerprint', 'SourceHealthCalculator', 'SourceHealthRepository', 'SourceProber', 'SourceHealthTab', 'ProviderAccount', 'ProviderImport', 'SourceAudit', 'SourceActions', 'SourceFinder', 'StreamHealth', 'SourceAuditPage', 'AutoRank', 'AutoProbe', 'SourceHealthCron'] as $rClass) {
 			require_once $rDir . '/' . $rClass . '.php';
 		}
 	}

@@ -400,7 +400,13 @@ JS;
 			. 'it has enough data (medium confidence or better, an hour on air or ' . AutoRank::MIN_PROBES_OK . ' good probes), a score of ' . AutoRank::MIN_SCORE . ' or more, ranks above the first, Source Audit does not find it dead or down, and either the first source is dead or down by Source Audit or the other one ranks '
 			. (int) AutoRank::MARGIN . ' points higher. The same proposal must come out ' . AutoRank::CONFIRM . ' evaluations in a row, a stream gets at most one record every '
 			. intdiv(AutoRank::MIN_INTERVAL_SEC, 3600) . ' h, and a proposal still standing is not recorded twice. Once switched on, a new order would only take effect at the stream\'s next failover or restart, never by cutting the source on air. '
-			. 'A day after each record, the day is read again: how the first source did, and what was seen of the proposed one.</div>';
+			. 'A day after each record, the day is read again: how the first source did, and what was seen of the proposed one.<br>'
+			. '<strong>Profiles.</strong> Sources with the same profile (codec, size, frame rate, scan, audio: the letter beside each) replace each other with only a time jump; '
+			. 'a change of profile makes players re-initialise their decoder, where many set-top boxes freeze or lose sound. A is the profile the stream is watched with most. '
+			. 'A source of profile A is preferred first when it ranks within ' . (int) AutoRank::PROFILE_SLACK . ' points of the best, and a second kind of record, <em>next in line</em>, proposes '
+			. 'putting a source of the first one\'s profile right behind it, so a drop is caught without a profile change. Backups get their profile from a probe: auto-rank makes up to '
+			. AutoProbe::PER_RUN . ' of its own every five minutes (never the source on air, nor an account in use unless the provider says a connection is free). '
+			. 'A day later, the record also counts the failovers of that day and how many changed profile.</div>';
 		$rHtml .= '<p class="small mb-2">Evaluated in the last hour: <strong>' . $rCov['evaluated'] . '</strong> stream(s) of ' . $rCov['streams'] . ' known; proposals waiting for confirmation: <strong>' . $rCov['pending'] . '</strong>.</p>';
 
 		$rCount = array_fill_keys(array_keys(self::RANK_VERDICTS), 0);
@@ -423,36 +429,43 @@ JS;
 		if ($rRows === []) {
 			return $rHtml . '<p class="text-muted mb-0">Nothing recorded yet. The first records come after two evaluations of a stream, about an hour after the module starts evaluating.</p>';
 		}
-		$rHtml .= '<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>When</th><th>Stream</th><th>Would put first</th><th>Why</th>'
+		$rHtml .= '<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>When</th><th>Stream</th><th>Proposal</th><th>Why</th>'
 			. '<th class="text-center" title="Source Health score of the first source / the proposed one">Scores</th><th title="how the two did in the day after">The day after</th><th>Verdict</th></tr></thead><tbody>';
 		foreach (array_slice($rRows, 0, self::MAX_ROWS) as $r) {
 			$rSources = array_values(array_filter(array_map(static fn ($v): string => is_string($v) ? trim($v) : '', (array) json_decode(SourceHealthRepository::raw((string) ($r['sources'] ?? '')), true))));
-			$rLabel = static function (string $rHash, int $rIndex) use ($rSources, $h): string {
+			$rLabel = static function (string $rHash, int $rIndex, string $rProfile = '') use ($rSources, $h): string {
+				$rTag = $rProfile !== '' && $rProfile !== '?' ? ' <span class="badge bg-label-dark" title="profile group: A is the one the stream is watched with">' . $h($rProfile) . '</span>' : '';
 				foreach ($rSources as $i => $rSource) {
 					if (md5($rSource) === $rHash) {
-						return '<strong>#' . ($i + 1) . '</strong> <code class="small">' . $h(SourceHealthTab::mask($rSource)) . '</code>';
+						return '<strong>#' . ($i + 1) . '</strong>' . $rTag . ' <code class="small">' . $h(SourceHealthTab::mask($rSource)) . '</code>';
 					}
 				}
-				return '<strong>#' . ($rIndex + 1) . '</strong> <span class="text-muted small">(no longer in the stream)</span>';
+				return '<strong>#' . ($rIndex + 1) . '</strong>' . $rTag . ' <span class="text-muted small">(no longer in the stream)</span>';
 			};
+			$rIsOrder = ($r['kind'] ?? 'first') === 'order';
+			$rProfileChange = ($r['old_profile'] ?? '') !== '' && ($r['new_profile'] ?? '') !== '' && $r['old_profile'] !== '?' && $r['new_profile'] !== '?' && $r['old_profile'] !== $r['new_profile'];
 			if ($r['outcome_at'] === null) {
 				$rAfter = '<span class="text-muted small">read in ' . SourceHealthTab::duration(max(60, (int) $r['decided_at'] + AutoRank::OUTCOME_SEC - $rNow)) . '</span>';
 				$rVerdict = '<span class="badge bg-label-info">waiting</span>';
 			} else {
-				$rAfter = '<small>first: ' . (int) $r['old_incidents'] . ' incident(s)' . ((int) $r['old_start_fails'] > 0 ? ', ' . (int) $r['old_start_fails'] . ' failed start(s)' : '')
+				$rAfter = '<small>' . ($rIsOrder ? 'next in line' : 'first') . ': ' . (int) $r['old_incidents'] . ' incident(s)' . ((int) $r['old_start_fails'] > 0 ? ', ' . (int) $r['old_start_fails'] . ' failed start(s)' : '')
 					. ((int) $r['old_uptime'] > 0 ? ', ' . SourceHealthTab::duration((int) $r['old_uptime']) . ' on air' : '') . '<br>'
 					. 'proposed: ' . ((int) $r['new_probe_total'] > 0 ? (int) $r['new_probe_ok'] . '/' . (int) $r['new_probe_total'] . ' probes ok' : 'no probe')
 					. ((int) $r['new_uptime'] > 0 ? ', ' . SourceHealthTab::duration((int) $r['new_uptime']) . ' on air, ' . (int) $r['new_incidents'] . ' incident(s)' : '')
-					. ((int) ($r['new_start_fails'] ?? 0) > 0 ? ', ' . (int) $r['new_start_fails'] . ' failed start(s)' : '') . '</small>';
+					. ((int) ($r['new_start_fails'] ?? 0) > 0 ? ', ' . (int) $r['new_start_fails'] . ' failed start(s)' : '')
+					. ($r['failovers'] !== null ? '<br>failovers: ' . (int) $r['failovers'] . ((int) $r['failovers'] > 0 ? ', ' . (int) $r['profile_switches'] . ' to another profile' : '') : '') . '</small>';
 				[$rL, $rB, $rW] = self::RANK_VERDICTS[$r['verdict']] ?? [$r['verdict'], 'bg-label-secondary', ''];
 				$rVerdict = '<span class="badge ' . $rB . '" title="' . $h($rW) . '">' . $h($rL) . '</span>';
 			}
 			$rHtml .= '<tr><td><small>' . $h(date('Y-m-d H:i', (int) $r['decided_at'])) . '</small></td>'
 				. '<td><a href="./source_health?id=' . (int) $r['stream_id'] . '" target="_blank" rel="noopener">' . $h(SourceHealthRepository::raw((string) ($r['name'] ?? '#' . $r['stream_id']))) . '</a></td>'
-				. '<td><small>' . $rLabel((string) $r['new_hash'], (int) $r['new_index']) . '<br><span class="text-muted">instead of</span> ' . $rLabel((string) $r['old_hash'], (int) $r['old_index'])
-				. ((int) $r['on_air'] === 1 ? ' <span class="badge bg-label-success" title="the first source was on air when this was recorded">on air</span>' : '') . '</small></td>'
+				. '<td><small>' . ($rIsOrder ? '<span class="badge bg-label-info" title="the first source stays; the one a drop falls back on changes">next in line</span> ' : '<span class="badge bg-label-primary">first</span> ')
+				. $rLabel((string) $r['new_hash'], (int) $r['new_index'], (string) ($r['new_profile'] ?? '')) . '<br><span class="text-muted">instead of</span> ' . $rLabel((string) $r['old_hash'], (int) $r['old_index'], (string) ($r['old_profile'] ?? ''))
+				. ((int) $r['on_air'] === 1 ? ' <span class="badge bg-label-success" title="the first source was on air when this was recorded">on air</span>' : '')
+				. ($rProfileChange && !$rIsOrder ? '<br><span class="badge bg-label-warning" title="players re-initialise their decoder at this switch">profile change ' . $h($r['old_profile'] . '→' . $r['new_profile']) . '</span>' : '')
+				. (($r['order_after'] ?? '') !== '' ? '<br><span class="text-muted">order: ' . $h(str_replace(',', ', ', (string) $r['order_after'])) . ' (now ' . $h(str_replace(',', ', ', (string) $r['order_before'])) . ')</span>' : '') . '</small></td>'
 				. '<td><small>' . $h($r['reason'])
-				. (($r['new_score'] !== null && (int) $r['new_score'] < AutoRank::MIN_SCORE) || (float) $r['new_value'] <= (float) $r['old_value']
+				. (!$rIsOrder && (($r['new_score'] !== null && (int) $r['new_score'] < AutoRank::MIN_SCORE) || (float) $r['new_value'] <= (float) $r['old_value'])
 					? '<br><span class="badge bg-label-secondary" title="recorded under the first rules: a source scoring under ' . AutoRank::MIN_SCORE . ', or ranking below the first, is no longer proposed">not proposed today</span>' : '')
 				. '</small></td>'
 				. '<td class="text-center"><small>' . ($r['old_score'] === null ? '–' : (int) $r['old_score']) . ' → <strong>' . ($r['new_score'] === null ? '–' : (int) $r['new_score']) . '</strong></small></td>'
